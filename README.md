@@ -1,114 +1,113 @@
+# Telegram Personal Gateway
 
-# Chatwoot Integrations: WhatsApp, Telegram, VK
+`telegram-personal-gateway` is a dedicated MTProto runtime for OneLink.
 
-This project demonstrates how to integrate [Chatwoot](https://www.chatwoot.com/) with messengers (WhatsApp via Wasender, Telegram via Telethon, VK via Callback API) using Python and FastAPI.
+It runs as a separate Python/FastAPI service backed by Telethon and is responsible for:
 
-## Features
+- maintaining Telegram user sessions
+- SMS code and 2FA login flow
+- incoming private-chat updates
+- outbound send/edit/delete/read operations
+- signed callbacks back into OneLink
+- signed temporary media URLs for inbound files
+- durable SQLite outbox for history and contacts import callbacks
 
-- Send and receive messages between Chatwoot and:
-  - WhatsApp (through Wasender)
-  - Telegram (through Telethon, non-bot account)
-  - VK (VK group messages)
-- Automatic contact sync and enrichment (custom attributes)
-- Architecture ready for AI automation and future extensions
+This service is not a generic Chatwoot bridge anymore. It is a OneLink-specific runtime for `Telegram Personal`.
 
-## Quick Start
+## Runtime contract
 
-### 1. Prerequisites
+OneLink calls the internal gateway API to:
 
-- Python 3.11 or newer
-- [Poetry](https://python-poetry.org/) for dependency management
-- A running instance of Chatwoot
-- Wasender account (for WhatsApp integration)
-- Telegram account (for Telethon, not a bot)
-- VK group and API credentials
+- sync channel configuration
+- request login code
+- verify login code
+- verify 2FA password
+- reconnect or disconnect a runtime
+- trigger bounded history sync
+- send, edit, delete, and mark messages read
+- fetch diagnostics
 
-### 2. Installation
+The gateway sends signed callbacks back into OneLink for:
 
-Clone the repository and install dependencies:
+- inbound messages
+- edited messages
+- deleted messages
+- read updates
+- activity events
+- runtime state updates
 
-```bash
-git clone git@github.com:feel90d/chatwoot-messenger-gateway.git
-cd chatwoot-messenger-gateway
-poetry install
+## Required environment variables
+
+```env
+TELEGRAM_PERSONAL_GATEWAY_TOKEN=replace-with-strong-shared-token
+TELEGRAM_PERSONAL_GATEWAY_PUBLIC_BASE_URL=https://telegram-gateway.example.com
 ```
 
-### 3. Configuration
+## Optional environment variables
 
-Copy `.env_template` to `.env` and fill in your credentials:
+```env
+TELEGRAM_PERSONAL_GATEWAY_MEDIA_SECRET=
+TELEGRAM_PERSONAL_GATEWAY_MEDIA_DIR=/data/telegram-personal-gateway
+TELEGRAM_PERSONAL_GATEWAY_HOST=0.0.0.0
+TELEGRAM_PERSONAL_GATEWAY_PORT=8000
+TELEGRAM_PERSONAL_GATEWAY_CALLBACK_TIMEOUT_SECONDS=15
+TELEGRAM_PERSONAL_GATEWAY_CALLBACK_MAX_RETRIES=3
+TELEGRAM_PERSONAL_GATEWAY_STATE_DB_PATH=/data/telegram-personal-gateway/state.sqlite3
+TELEGRAM_PERSONAL_GATEWAY_OUTBOX_BATCH_SIZE=50
+TELEGRAM_PERSONAL_GATEWAY_OUTBOX_POLL_INTERVAL_SECONDS=1
+TELEGRAM_PERSONAL_GATEWAY_OUTBOX_MAX_DELIVERY_ATTEMPTS=20
+TELEGRAM_PERSONAL_GATEWAY_OUTBOX_RETENTION_HOURS=168
+TELEGRAM_PERSONAL_GATEWAY_MEDIA_TTL_SECONDS=900
+TELEGRAM_PERSONAL_GATEWAY_HISTORY_DIALOG_LIMIT=20
+TELEGRAM_PERSONAL_GATEWAY_HISTORY_MESSAGE_LIMIT=50
+TELEGRAM_PERSONAL_GATEWAY_HISTORY_LOOKBACK_HOURS=24
+TELEGRAM_PERSONAL_GATEWAY_HISTORY_OVERLAP_SECONDS=300
+```
+
+If `TELEGRAM_PERSONAL_GATEWAY_MEDIA_SECRET` is omitted, the service reuses `TELEGRAM_PERSONAL_GATEWAY_TOKEN`.
+
+History and contacts sync now enqueue import callbacks into a local SQLite outbox first. This lets long sync runs continue even if OneLink is temporarily unavailable, and delivery resumes automatically from the gateway.
+
+## Local run
 
 ```bash
 cp .env_template .env
+poetry install
+poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Edit `.env` and set the following sections:
-
-- **Chatwoot**:
-  - `CHATWOOT_API_ACCESS_TOKEN`
-  - `CHATWOOT_ACCOUNT_ID`
-  - `CHATWOOT_BASE_URL`
-  - `CHATWOOT_WEBHOOK_ID_WHATSAPP`
-  - `CHATWOOT_WEBHOOK_ID_TELEGRAM`
-  - `CHATWOOT_WEBHOOK_ID_VK`
-
-- **Wasender**:
-  - `WASENDER_API_KEY`
-  - `WASENDER_WEBHOOK_SECRET`
-  - `WASENDER_WEBHOOK_ID`
-  - `WASENDER_INBOX_ID`
-
-- **Telegram**:
-  - `TG_API_ID`
-  - `TG_API_HASH`
-  - `TG_SESSION_NAME` (arbitrary name for your Telethon session)
-  - `TG_INBOX_ID`
-
-- **VK**:
-  - `VK_ACCESS_TOKEN`
-  - `VK_GROUP_ID`
-  - `VK_SECRET`
-  - `VK_CONFIRMATION`
-  - `VK_API_VERSION`
-  - `VK_CALLBACK_ID`
-  - `VK_INBOX_ID`
-
-> **Note:** All sensitive values must be kept secret. Never commit `.env` to your public repository.
-
-### 4. Running the App
+## Docker run
 
 ```bash
-python ./app/main.py
+docker build -t telegram-personal-gateway .
+
+docker run --rm \
+  -p 8000:8000 \
+  --env-file .env \
+  -v telegram_personal_gateway_data:/data/telegram-personal-gateway \
+  telegram-personal-gateway
 ```
 
-The application exposes a FastAPI server with webhooks for all configured channels. You can use [ngrok](https://ngrok.com/) or another tunnel to expose your local server for webhooks.
+## OneLink integration variables
 
-Example:
+The OneLink Rails app must also know how to reach this service:
+
+```env
+TELEGRAM_PERSONAL_GATEWAY_URL=http://telegram-personal-gateway:8000
+TELEGRAM_PERSONAL_GATEWAY_TOKEN=replace-with-the-same-shared-token
+```
+
+## Health check
 
 ```bash
-ngrok http 8000
+curl http://127.0.0.1:8000/health
 ```
 
-Update your webhook URLs in Chatwoot, Wasender, and VK to point to your public ngrok address.
+Expected response:
 
-### 5. How it Works
-
-- **Outgoing:** Messages from Chatwoot are sent to WhatsApp, Telegram, or VK via their respective adapters.
-- **Incoming:** Replies from users in messengers are delivered to Chatwoot with all attributes preserved.
-- Contacts are matched or created based on messenger IDs (e.g., `telegram_user_id`, `telegram_username`).
-
-### 6. Development
-
-- Format code: `poetry run black .`
-- Lint code: `poetry run lint`
-
-## Authors
-
-* [feel90d](mailto:feel90d@gmail.com), Telegram: [@feel90d](https://t.me/feel90d)
-* [lukyan0v\_a](mailto:forjob34@gmail.com), Telegram: [@lukyan0v\_a](https://t.me/lukyan0v_a)
-
-If you have any questions, want to discuss integrations, or are interested in a similar solution for your business — feel free to message us on Telegram or by email.
-This article was written to share practical experience and help the community — we’re always happy to connect and answer your questions!
-
-## License
-
-MIT (or your preferred license)
+```json
+{
+  "ok": true,
+  "service": "telegram_personal_gateway"
+}
+```

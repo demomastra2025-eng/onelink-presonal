@@ -1,15 +1,13 @@
-# Интеграция Chatwoot: WhatsApp, Telegram, VK
+# Telegram Personal Gateway
 
-Этот проект демонстрирует, как интегрировать [Chatwoot](https://www.chatwoot.com/) с мессенджерами (WhatsApp через Wasender, Telegram через Telethon, VK через Callback API) с использованием Python и FastAPI.
+Этот проект запускает MTProto gateway для личного Telegram в OneLink на Python, FastAPI и Telethon.
 
 ## Возможности
 
-* Отправка и приём сообщений между Chatwoot и:
-  + WhatsApp (через Wasender)
-  + Telegram (через Telethon, не бот-аккаунт)
-  + VK (сообщения групп)
-* Автоматическая синхронизация и обогащение контактов (custom attributes)
-* Архитектура готова для AI-автоматизации и будущих расширений
+* Внутренний runtime API для OneLink
+* Авторизация личного Telegram через код и 2FA
+* Приём личных сообщений, edits, media proxy и исходящая отправка
+* Подписанные callbacks обратно в OneLink
 
 ## Быстрый старт
 

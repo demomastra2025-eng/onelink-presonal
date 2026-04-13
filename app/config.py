@@ -1,134 +1,104 @@
 import os
-from typing import Dict, Optional
+from pathlib import Path
 
-from pydantic import BaseModel, Field, HttpUrl, ValidationError
-
-
-class TelegramConfig(BaseModel):
-    api_id: int
-    api_hash: str
-    session_name: str
-    inbox_id: int  # per-channel inbox
+from pydantic import BaseModel, Field
 
 
-class WasenderWebhookConfig(BaseModel):
-    webhook_id: str
-    webhook_secret: str
-    api_key: str
-    inbox_id: int  # per-channel inbox
-
-
-class VKCommunityConfig(BaseModel):
-    # VK community configuration for Callback API and sending messages
-    callback_id: str  # Unique callback ID for path-based security
-    group_id: int  # VK group ID (without minus)
-    access_token: str  # VK community access token
-    secret: str  # Secret key for callback signature verification
-    confirmation: str  # Confirmation string from VK
-    api_version: str = "5.199"  # VK API version
-    inbox_id: int  # per-channel inbox
-
-
-class ChatwootWebhookConfig(BaseModel):
-    api_access_token: str
-    account_id: int
-    base_url: HttpUrl
-    # Map webhook id -> channel name
-    channel_by_webhook_id: Dict[str, str] = Field(default_factory=dict)
-
-
-class AppConfig(BaseModel):
-    telegram: Optional[TelegramConfig] = None
-    wasender: Optional[WasenderWebhookConfig] = None
-    vk: Optional[VKCommunityConfig] = None
-    chatwoot: ChatwootWebhookConfig
-
-
-def _getenv(name: str) -> str:
-    """Get required environment variable or raise RuntimeError."""
-    v = os.getenv(name)
-    if not v:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return v
-
-
-def _build_channel_map() -> Dict[str, str]:
-    """Build a map from webhook ID to channel name."""
-    mapping: Dict[str, str] = {}
-    w = os.getenv("CHATWOOT_WEBHOOK_ID_WHATSAPP")
-    t = os.getenv("CHATWOOT_WEBHOOK_ID_TELEGRAM")
-    v = os.getenv("CHATWOOT_WEBHOOK_ID_VK")
-    if w:
-        mapping[w] = "whatsapp"
-    if t:
-        mapping[t] = "telegram"
-    if v:
-        mapping[v] = "vk"
-    return mapping
-
-
-def load_config() -> AppConfig:
-    try:
-        # Telegram config: only if all variables are present
-        if (
-            os.getenv("TG_API_ID")
-            and os.getenv("TG_API_HASH")
-            and os.getenv("TG_SESSION_NAME")
-        ):
-            telegram_cfg = TelegramConfig(
-                api_id=int(_getenv("TG_API_ID")),
-                api_hash=_getenv("TG_API_HASH"),
-                session_name=_getenv("TG_SESSION_NAME"),
-                inbox_id=int(os.getenv("TG_INBOX_ID")),
-            )
-        else:
-            telegram_cfg = None
-
-        # Wasender config: only if all variables are present
-        if (
-            os.getenv("WASENDER_WEBHOOK_ID")
-            and os.getenv("WASENDER_WEBHOOK_SECRET")
-            and os.getenv("WASENDER_API_KEY")
-        ):
-            wasender_cfg = WasenderWebhookConfig(
-                webhook_id=_getenv("WASENDER_WEBHOOK_ID"),
-                webhook_secret=_getenv("WASENDER_WEBHOOK_SECRET"),
-                api_key=_getenv("WASENDER_API_KEY"),
-                inbox_id=int(os.getenv("WASENDER_INBOX_ID")),
-            )
-        else:
-            wasender_cfg = None
-
-        # VK: create config only if all required variables are present
-        if (
-            os.getenv("VK_CALLBACK_ID")
-            and os.getenv("VK_GROUP_ID")
-            and os.getenv("VK_ACCESS_TOKEN")
-            and os.getenv("VK_SECRET")
-            and os.getenv("VK_CONFIRMATION")
-        ):
-            vk_cfg = VKCommunityConfig(
-                callback_id=_getenv("VK_CALLBACK_ID"),
-                group_id=int(_getenv("VK_GROUP_ID")),
-                access_token=_getenv("VK_ACCESS_TOKEN"),
-                secret=_getenv("VK_SECRET"),
-                confirmation=_getenv("VK_CONFIRMATION"),
-                api_version=os.getenv("VK_API_VERSION") or "5.199",
-                inbox_id=int(os.getenv("VK_INBOX_ID")),
-            )
-        else:
-            vk_cfg = None
-
-        return AppConfig(
-            telegram=telegram_cfg,
-            wasender=wasender_cfg,
-            vk=vk_cfg,
-            chatwoot=ChatwootWebhookConfig(
-                api_access_token=_getenv("CHATWOOT_API_ACCESS_TOKEN"),
-                account_id=int(_getenv("CHATWOOT_ACCOUNT_ID")),
-                base_url=_getenv("CHATWOOT_BASE_URL"),
-                channel_by_webhook_id=_build_channel_map(),
-            ),
+class GatewaySettings(BaseModel):
+    internal_token: str
+    public_base_url: str = "http://127.0.0.1:8000"
+    media_secret: str
+    media_ttl_seconds: int = 900
+    state_db_path: Path
+    callback_timeout_seconds: int = 15
+    callback_max_retries: int = 3
+    outbox_batch_size: int = 50
+    outbox_poll_interval_seconds: float = 1.0
+    outbox_max_delivery_attempts: int = 20
+    outbox_retention_hours: int = 168
+    host: str = "0.0.0.0"
+    port: int = 8000
+    media_dir: Path = Field(
+        default_factory=lambda: Path(
+            os.getenv("TELEGRAM_PERSONAL_MEDIA_DIR", "/tmp/telegram-personal-gateway")
         )
-    except ValidationError as e:
-        raise RuntimeError(f"Invalid configuration: {e}") from e
+    )
+    device_model: str = "OneLink Telegram Personal Gateway"
+    system_version: str = "1.0"
+    app_version: str = "1.0"
+    lang_code: str = "en"
+    system_lang_code: str = "en-US"
+    history_dialog_limit: int = 20
+    history_message_limit: int = 50
+    history_lookback_hours: int = 24
+    history_overlap_seconds: int = 300
+    contacts_dialog_limit: int = 0
+    contacts_include_saved: bool = True
+    contacts_include_dialogs: bool = True
+
+
+def load_settings() -> GatewaySettings:
+    media_dir = Path(
+        os.getenv("TELEGRAM_PERSONAL_MEDIA_DIR", "/tmp/telegram-personal-gateway")
+    )
+    return GatewaySettings(
+        internal_token=os.environ["TELEGRAM_PERSONAL_GATEWAY_TOKEN"],
+        public_base_url=os.getenv(
+            "TELEGRAM_PERSONAL_GATEWAY_PUBLIC_BASE_URL", "http://127.0.0.1:8000"
+        ).rstrip("/"),
+        media_secret=os.getenv(
+            "TELEGRAM_PERSONAL_GATEWAY_MEDIA_SECRET",
+            os.environ["TELEGRAM_PERSONAL_GATEWAY_TOKEN"],
+        ),
+        media_ttl_seconds=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_MEDIA_TTL_SECONDS", "900")
+        ),
+        callback_timeout_seconds=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_CALLBACK_TIMEOUT_SECONDS", "15")
+        ),
+        callback_max_retries=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_CALLBACK_MAX_RETRIES", "3")
+        ),
+        state_db_path=Path(
+            os.getenv(
+                "TELEGRAM_PERSONAL_GATEWAY_STATE_DB_PATH",
+                str(media_dir / "state.sqlite3"),
+            )
+        ),
+        outbox_batch_size=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_OUTBOX_BATCH_SIZE", "50")
+        ),
+        outbox_poll_interval_seconds=float(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_OUTBOX_POLL_INTERVAL_SECONDS", "1")
+        ),
+        outbox_max_delivery_attempts=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_OUTBOX_MAX_DELIVERY_ATTEMPTS", "20")
+        ),
+        outbox_retention_hours=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_OUTBOX_RETENTION_HOURS", "168")
+        ),
+        host=os.getenv("TELEGRAM_PERSONAL_GATEWAY_HOST", "0.0.0.0"),
+        port=int(os.getenv("TELEGRAM_PERSONAL_GATEWAY_PORT", "8000")),
+        media_dir=media_dir,
+        history_dialog_limit=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_HISTORY_DIALOG_LIMIT", "20")
+        ),
+        history_message_limit=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_HISTORY_MESSAGE_LIMIT", "50")
+        ),
+        history_lookback_hours=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_HISTORY_LOOKBACK_HOURS", "24")
+        ),
+        history_overlap_seconds=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_HISTORY_OVERLAP_SECONDS", "300")
+        ),
+        contacts_dialog_limit=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_CONTACTS_DIALOG_LIMIT", "0")
+        ),
+        contacts_include_saved=os.getenv(
+            "TELEGRAM_PERSONAL_GATEWAY_CONTACTS_INCLUDE_SAVED", "true"
+        ).lower() in {"1", "true", "yes", "on"},
+        contacts_include_dialogs=os.getenv(
+            "TELEGRAM_PERSONAL_GATEWAY_CONTACTS_INCLUDE_DIALOGS", "true"
+        ).lower() in {"1", "true", "yes", "on"},
+    )

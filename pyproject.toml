@@ -1,7 +1,7 @@
 [project]
-name = "chatwoot-integrations"
+name = "telegram-personal-gateway"
 version = "0.1.0"
-description = ""
+description = "Telegram Personal MTProto runtime service for OneLink"
 authors = [
     {name = "@feel90d",email = "feel90d@gmail.com"},
     {name = "@lukyan0v_a",email = "forjob34@gmail.com"},
@@ -36,4 +36,3 @@ flake8 = "^7.3.0"
 [tool.poetry.scripts]
 lint = "scripts.lint:main"
 gen-webhook-id = "scripts.gen_webhook_id:main"
-
