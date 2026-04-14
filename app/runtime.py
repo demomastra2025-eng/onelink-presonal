@@ -490,7 +490,7 @@ class ChannelRuntime:
             authorized = await self._client.is_user_authorized()
             self._set_state(
                 "connected" if authorized else "disconnected",
-                self.state.lifecycle_state if authorized else "pending_auth",
+                "connected" if authorized else "pending_auth",
                 None,
             )
         except errors.FloodWaitError as error:

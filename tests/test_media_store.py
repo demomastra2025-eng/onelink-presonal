@@ -79,3 +79,39 @@ class MediaStoreTest(unittest.TestCase):
 
             self.assertFalse(stored.path.exists())
             self.assertFalse((settings.media_dir / f"{stored.media_id}.json").exists())
+
+    def test_single_item_list_metadata_is_loaded_for_backward_compatibility(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = self.build_settings(root)
+            media_dir = settings.media_dir
+            media_dir.mkdir(parents=True, exist_ok=True)
+            media_id = "legacy-media"
+            media_path = media_dir / "legacy-media-voice.ogg"
+            media_path.write_bytes(b"legacy-bytes")
+            (media_dir / f"{media_id}.json").write_text(
+                '[{"media_id":"legacy-media","path":"legacy-media-voice.ogg","filename":"voice.ogg","content_type":"audio/ogg","expires_at":4102444800}]',
+                encoding="utf-8",
+            )
+
+            store = MediaStore(settings)
+            token = self.token_from_signed_url(store.signed_url(media_id))
+            reloaded = store.get(media_id, token)
+
+            self.assertEqual("voice.ogg", reloaded.filename)
+            self.assertEqual("audio/ogg", reloaded.content_type)
+            self.assertEqual(b"legacy-bytes", reloaded.path.read_bytes())
+
+    def test_invalid_metadata_shape_is_cleaned_up(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = self.build_settings(root)
+            media_dir = settings.media_dir
+            media_dir.mkdir(parents=True, exist_ok=True)
+            media_id = "broken-media"
+            (media_dir / f"{media_id}.json").write_text('["bad-shape"]', encoding="utf-8")
+
+            store = MediaStore(settings)
+
+            self.assertIsNone(store._load_from_disk(media_id))
+            self.assertFalse((media_dir / f"{media_id}.json").exists())

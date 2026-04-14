@@ -53,6 +53,11 @@ class MediaStore:
             metadata_path.unlink(missing_ok=True)
             return None
 
+        payload = self._coerce_metadata_payload(payload)
+        if payload is None:
+            metadata_path.unlink(missing_ok=True)
+            return None
+
         relative_path = payload.get("path")
         if not relative_path:
             metadata_path.unlink(missing_ok=True)
@@ -143,3 +148,10 @@ class MediaStore:
             stored = self._load_from_disk(media_id)
             if stored is None or stored.expires_at < now or not stored.path.exists():
                 self._delete_media(media_id, stored)
+
+    def _coerce_metadata_payload(self, payload: object) -> dict | None:
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict):
+            return payload[0]
+        return None
