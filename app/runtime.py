@@ -323,13 +323,18 @@ class ChannelRuntime:
                     self._retry_dead_contacts_delivery()
                     await self._refresh_contacts_delivery_state(emit=True, force_emit=True)
                 return self.state.snapshot()
-            self._schedule_history_sync(
-                reason="manual",
-                force=force or reset_cursor,
-                reset_cursor=reset_cursor,
-            )
             if include_contacts:
-                self._schedule_contacts_sync(reason="manual", force=force or reset_cursor)
+                self._schedule_contacts_then_history_sync(
+                    reason="manual",
+                    force=force or reset_cursor,
+                    reset_cursor=reset_cursor,
+                )
+            else:
+                self._schedule_history_sync(
+                    reason="manual",
+                    force=force or reset_cursor,
+                    reset_cursor=reset_cursor,
+                )
             await self._emit_runtime_update()
             return self.state.snapshot()
 
@@ -889,6 +894,7 @@ class ChannelRuntime:
                 ) or _iso_now()
                 self.state.runtime_state.pop("contacts_sync_error", None)
 
+        queued_history_started = self._maybe_schedule_history_after_contacts()
         self._persist_runtime_state()
 
         current_state = str(self.state.runtime_state.get("contacts_sync_state") or "")
@@ -903,7 +909,7 @@ class ChannelRuntime:
                 )
             )
         )
-        if should_emit:
+        if should_emit or queued_history_started:
             await self._emit_runtime_update()
 
     async def _emit_runtime_update(self) -> None:
@@ -923,7 +929,12 @@ class ChannelRuntime:
 
     def _schedule_post_auth_sync(self, *, reason: str, force: bool = False) -> None:
         should_force = force or reason == "reconnect"
-        should_run_history = reason in {"verify_code", "verify_password", "qr_login", "reconnect"}
+        should_run_contacts = reason in {"sync", "verify_code", "verify_password", "qr_login", "reconnect"}
+        should_run_history = reason in {"reconnect"}
+
+        if should_run_contacts and (should_force or self._should_auto_schedule_contacts_sync()):
+            self._schedule_contacts_sync(reason=reason, force=should_force)
+
         if should_run_history and (should_force or self._should_auto_schedule_history_sync()):
             self._schedule_history_sync(reason=reason, force=should_force)
 
@@ -960,6 +971,67 @@ class ChannelRuntime:
         self.state.runtime_state["contacts_sync_requested_at"] = _iso_now()
         self.state.runtime_state["contacts_sync_reader_completed_at"] = None
         self._contacts_sync_task = asyncio.create_task(self._run_contacts_sync(reason=reason))
+
+    def _queue_history_after_contacts(
+        self, *, reason: str, force: bool = False, reset_cursor: bool = False
+    ) -> None:
+        self.state.runtime_state["history_sync_after_contacts_reason"] = reason
+        self.state.runtime_state["history_sync_after_contacts_force"] = bool(force)
+        self.state.runtime_state["history_sync_after_contacts_reset_cursor"] = bool(reset_cursor)
+
+    def _queued_history_after_contacts(self) -> Optional[Dict[str, Any]]:
+        reason = self.state.runtime_state.get("history_sync_after_contacts_reason")
+        if not reason:
+            return None
+        return {
+            "reason": str(reason),
+            "force": bool(self.state.runtime_state.get("history_sync_after_contacts_force")),
+            "reset_cursor": bool(self.state.runtime_state.get("history_sync_after_contacts_reset_cursor")),
+        }
+
+    def _clear_queued_history_after_contacts(self) -> None:
+        for key in (
+            "history_sync_after_contacts_reason",
+            "history_sync_after_contacts_force",
+            "history_sync_after_contacts_reset_cursor",
+        ):
+            self.state.runtime_state.pop(key, None)
+
+    def _schedule_contacts_then_history_sync(
+        self, *, reason: str, force: bool = False, reset_cursor: bool = False
+    ) -> None:
+        should_run_contacts = (
+            force
+            or (self._contacts_sync_task is not None and not self._contacts_sync_task.done())
+            or self._should_auto_schedule_contacts_sync()
+        )
+        if should_run_contacts:
+            self._queue_history_after_contacts(
+                reason=reason,
+                force=force,
+                reset_cursor=reset_cursor,
+            )
+            self._schedule_contacts_sync(reason=reason, force=force)
+            return
+
+        self._schedule_history_sync(reason=reason, force=force, reset_cursor=reset_cursor)
+
+    def _maybe_schedule_history_after_contacts(self) -> bool:
+        queued_history = self._queued_history_after_contacts()
+        if not queued_history:
+            return False
+
+        contacts_state = str(self.state.runtime_state.get("contacts_sync_state") or "")
+        if contacts_state not in {"completed", "completed_with_errors"}:
+            return False
+
+        self._clear_queued_history_after_contacts()
+        self._schedule_history_sync(
+            reason=queued_history["reason"],
+            force=queued_history["force"],
+            reset_cursor=queued_history["reset_cursor"],
+        )
+        return True
 
     async def _cancel_history_sync_task(self) -> None:
         if not self._history_sync_task or self._history_sync_task.done():
