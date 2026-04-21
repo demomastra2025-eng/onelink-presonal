@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from telethon.tl import types
+
 from app.config import GatewaySettings
 from app.media_store import MediaStore
 from app.outbox import GatewayStore
@@ -36,6 +38,33 @@ class _FakeAuthorizedClient:
         return None
 
 
+class _FakeProfilePhotoClient(_FakeAuthorizedClient):
+    def __init__(self, *, peer_user=None):
+        super().__init__()
+        self.peer_user = peer_user
+        self.get_entity_calls = []
+        self.download_profile_photo_calls = []
+
+    async def get_entity(self, raw):
+        self.get_entity_calls.append(raw)
+        return self.peer_user
+
+    async def download_profile_photo(self, sender, file, download_big=False):
+        self.download_profile_photo_calls.append(
+            {
+                "sender_id": getattr(sender, "id", None),
+                "download_big": download_big,
+            }
+        )
+        target = Path(f"{file}.jpg")
+        target.write_bytes(
+            f"avatar-{getattr(getattr(sender, 'photo', None), 'photo_id', 'none')}".encode(
+                "utf-8"
+            )
+        )
+        return str(target)
+
+
 class GatewayRuntimeStateTest(unittest.IsolatedAsyncioTestCase):
     def build_settings(self, root: Path) -> GatewaySettings:
         return GatewaySettings(
@@ -62,7 +91,7 @@ class GatewayRuntimeStateTest(unittest.IsolatedAsyncioTestCase):
             contacts_include_dialogs=True,
         )
 
-    async def test_connect_marks_authorized_session_as_connected(self):
+    async def build_runtime(self, fake_client):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         root = Path(temp_dir.name)
@@ -85,10 +114,75 @@ class GatewayRuntimeStateTest(unittest.IsolatedAsyncioTestCase):
             media_store=MediaStore(settings),
             store=store,
         )
-        runtime._client = _FakeAuthorizedClient()
+        runtime._client = fake_client
         self.addAsyncCleanup(runtime.close)
+        return runtime
+
+    async def test_connect_marks_authorized_session_as_connected(self):
+        runtime = await self.build_runtime(_FakeAuthorizedClient())
 
         await runtime._connect_if_needed()
 
         self.assertEqual("connected", runtime.state.connection_state)
         self.assertEqual("connected", runtime.state.lifecycle_state)
+
+    async def test_profile_photo_cache_uses_avatar_fingerprint(self):
+        client = _FakeProfilePhotoClient()
+        runtime = await self.build_runtime(client)
+
+        first_sender = types.User(
+            id=23,
+            first_name="Sojan",
+            photo=types.UserProfilePhoto(photo_id=1001, dc_id=2),
+        )
+        second_sender = types.User(
+            id=23,
+            first_name="Sojan",
+            photo=types.UserProfilePhoto(photo_id=1002, dc_id=2),
+        )
+
+        first_url = await runtime._profile_photo_url(first_sender)
+        second_url = await runtime._profile_photo_url(second_sender)
+
+        self.assertNotEqual(first_url, second_url)
+        self.assertEqual(2, len(client.download_profile_photo_calls))
+        self.assertTrue(
+            runtime._media_store.has_profile_avatar(
+                channel_id=42,
+                peer_user_id="23",
+                avatar_fingerprint="1001",
+            )
+        )
+        self.assertTrue(
+            runtime._media_store.has_profile_avatar(
+                channel_id=42,
+                peer_user_id="23",
+                avatar_fingerprint="1002",
+            )
+        )
+
+    async def test_fetch_profile_avatar_recovers_from_avatar_cache_miss(self):
+        peer_user = types.User(
+            id=23,
+            first_name="Sojan",
+            photo=types.UserProfilePhoto(photo_id=1002, dc_id=2),
+        )
+        client = _FakeProfilePhotoClient(peer_user=peer_user)
+        runtime = await self.build_runtime(client)
+
+        stored = await runtime.fetch_profile_avatar(
+            peer_user_id="23",
+            avatar_fingerprint="1002",
+        )
+
+        self.assertTrue(stored.path.exists())
+        self.assertEqual(1, client.connect_calls)
+        self.assertEqual([23], client.get_entity_calls)
+        self.assertEqual(1, len(client.download_profile_photo_calls))
+
+        cached = await runtime.fetch_profile_avatar(
+            peer_user_id="23",
+            avatar_fingerprint="1002",
+        )
+        self.assertEqual(stored.path, cached.path)
+        self.assertEqual(1, len(client.download_profile_photo_calls))

@@ -9,6 +9,7 @@ class GatewaySettings(BaseModel):
     public_base_url: str = "http://127.0.0.1:8000"
     media_secret: str
     media_ttl_seconds: int = 900
+    avatar_ttl_seconds: int = 2_592_000
     state_db_path: Path
     callback_timeout_seconds: int = 15
     callback_max_retries: int = 3
@@ -52,6 +53,9 @@ def load_settings() -> GatewaySettings:
         ),
         media_ttl_seconds=int(
             os.getenv("TELEGRAM_PERSONAL_GATEWAY_MEDIA_TTL_SECONDS", "900")
+        ),
+        avatar_ttl_seconds=int(
+            os.getenv("TELEGRAM_PERSONAL_GATEWAY_AVATAR_TTL_SECONDS", "2592000")
         ),
         callback_timeout_seconds=int(
             os.getenv("TELEGRAM_PERSONAL_GATEWAY_CALLBACK_TIMEOUT_SECONDS", "15")
@@ -97,8 +101,10 @@ def load_settings() -> GatewaySettings:
         ),
         contacts_include_saved=os.getenv(
             "TELEGRAM_PERSONAL_GATEWAY_CONTACTS_INCLUDE_SAVED", "true"
-        ).lower() in {"1", "true", "yes", "on"},
+        ).lower()
+        in {"1", "true", "yes", "on"},
         contacts_include_dialogs=os.getenv(
             "TELEGRAM_PERSONAL_GATEWAY_CONTACTS_INCLUDE_DIALOGS", "true"
-        ).lower() in {"1", "true", "yes", "on"},
+        ).lower()
+        in {"1", "true", "yes", "on"},
     )

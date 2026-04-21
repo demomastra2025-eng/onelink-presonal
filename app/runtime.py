@@ -98,8 +98,12 @@ class ChannelRuntime:
         self._profile_photo_url_cache: Dict[str, Optional[str]] = {}
         self._outbox_delivery_task: asyncio.Task | None = None
         self._outbox_wakeup = asyncio.Event()
-        self._history_delivery_emitted_count = int(state.runtime_state.get("history_sync_count", 0) or 0)
-        self._contacts_delivery_emitted_count = int(state.runtime_state.get("contacts_sync_count", 0) or 0)
+        self._history_delivery_emitted_count = int(
+            state.runtime_state.get("history_sync_count", 0) or 0
+        )
+        self._contacts_delivery_emitted_count = int(
+            state.runtime_state.get("contacts_sync_count", 0) or 0
+        )
 
     async def close(self) -> None:
         await self._cancel_qr_wait_task()
@@ -119,7 +123,9 @@ class ChannelRuntime:
             self.state.callback_url = str(payload.callback_url)
             self.state.webhook_secret = payload.webhook_secret
             self.state.runtime_state = self._merge_runtime_state(payload.runtime_state)
-            self.state.string_session = payload.string_session or self.state.string_session
+            self.state.string_session = (
+                payload.string_session or self.state.string_session
+            )
             self._persist_runtime_state()
             self._ensure_outbox_delivery_task()
             await self._ensure_client()
@@ -252,6 +258,41 @@ class ChannelRuntime:
             await self._emit_runtime_update()
             return self.state.snapshot()
 
+    async def fetch_profile_avatar(self, *, peer_user_id: str, avatar_fingerprint: str):
+        try:
+            return self._media_store.get_profile_avatar(
+                channel_id=self.state.channel_id,
+                peer_user_id=peer_user_id,
+                avatar_fingerprint=avatar_fingerprint,
+            )
+        except FileNotFoundError:
+            pass
+
+        async with self._lock:
+            try:
+                return self._media_store.get_profile_avatar(
+                    channel_id=self.state.channel_id,
+                    peer_user_id=peer_user_id,
+                    avatar_fingerprint=avatar_fingerprint,
+                )
+            except FileNotFoundError:
+                pass
+
+            await self._ensure_client()
+            await self._connect_if_needed()
+            entity = await self._resolve_entity(peer_user_id)
+            if self._profile_photo_fingerprint(entity) != avatar_fingerprint:
+                raise FileNotFoundError("Profile avatar not found or changed")
+
+            avatar_stored, _ = await self._download_profile_photo_assets(
+                entity,
+                avatar_fingerprint=avatar_fingerprint,
+                store_transient_media=False,
+            )
+            if avatar_stored is None:
+                raise FileNotFoundError("Profile avatar not found or expired")
+            return avatar_stored
+
     async def diagnostics(self) -> Dict[str, Any]:
         async with self._lock:
             me = None
@@ -271,45 +312,86 @@ class ChannelRuntime:
                     logger.exception("failed to fetch self diagnostics")
                 authorized = await self._client.is_user_authorized()
                 if authorized:
-                    unread_reactions_count = await self._private_unread_reactions_count()
+                    unread_reactions_count = (
+                        await self._private_unread_reactions_count()
+                    )
             return {
                 "channel": self.state.snapshot(),
                 "connected": connected,
                 "authorized": authorized,
-                "auth_state": "authorized" if authorized else self.state.lifecycle_state,
+                "auth_state": (
+                    "authorized" if authorized else self.state.lifecycle_state
+                ),
                 "connection_state": self.state.connection_state,
                 "lifecycle_state": self.state.lifecycle_state,
                 "last_inbound_at": self.state.last_inbound_at,
                 "last_outbound_at": self.state.last_outbound_at,
                 "flood_wait_until": self.state.flood_wait_until,
                 "flood_wait_seconds": _seconds_until(self.state.flood_wait_until),
-                "history_sync_state": self.state.runtime_state.get("history_sync_state"),
-                "last_history_sync_at": self.state.runtime_state.get("history_sync_completed_at"),
-                "history_sync_count": self.state.runtime_state.get("history_sync_count", 0),
-                "history_sync_enqueued_count": self.state.runtime_state.get("history_sync_enqueued_count", 0),
-                "history_sync_pending_count": self.state.runtime_state.get("history_sync_pending_count", 0),
-                "history_sync_dead_count": self.state.runtime_state.get("history_sync_dead_count", 0),
-                "history_dialog_count": self.state.runtime_state.get("history_dialog_count", 0),
+                "history_sync_state": self.state.runtime_state.get(
+                    "history_sync_state"
+                ),
+                "last_history_sync_at": self.state.runtime_state.get(
+                    "history_sync_completed_at"
+                ),
+                "history_sync_count": self.state.runtime_state.get(
+                    "history_sync_count", 0
+                ),
+                "history_sync_enqueued_count": self.state.runtime_state.get(
+                    "history_sync_enqueued_count", 0
+                ),
+                "history_sync_pending_count": self.state.runtime_state.get(
+                    "history_sync_pending_count", 0
+                ),
+                "history_sync_dead_count": self.state.runtime_state.get(
+                    "history_sync_dead_count", 0
+                ),
+                "history_dialog_count": self.state.runtime_state.get(
+                    "history_dialog_count", 0
+                ),
                 "history_sync_mode": self.state.runtime_state.get("history_sync_mode"),
-                "history_sync_cutoff_at": self.state.runtime_state.get("history_sync_cutoff_at"),
-                "history_sync_checkpoint_at": self._history_sync_checkpoint().get("last_checkpoint_at"),
-                "history_sync_resume_index": self._history_sync_checkpoint().get("next_dialog_index", 0),
-                "history_sync_resume_total": len(self._history_sync_checkpoint().get("dialog_user_ids", [])),
+                "history_sync_cutoff_at": self.state.runtime_state.get(
+                    "history_sync_cutoff_at"
+                ),
+                "history_sync_checkpoint_at": self._history_sync_checkpoint().get(
+                    "last_checkpoint_at"
+                ),
+                "history_sync_resume_index": self._history_sync_checkpoint().get(
+                    "next_dialog_index", 0
+                ),
+                "history_sync_resume_total": len(
+                    self._history_sync_checkpoint().get("dialog_user_ids", [])
+                ),
                 "history_sync_last_completed_dialog_id": self._history_sync_checkpoint().get(
                     "last_completed_dialog_id"
                 ),
-                "contacts_sync_state": self.state.runtime_state.get("contacts_sync_state"),
-                "last_contacts_sync_at": self.state.runtime_state.get("contacts_sync_completed_at"),
-                "contacts_sync_count": self.state.runtime_state.get("contacts_sync_count", 0),
-                "contacts_sync_enqueued_count": self.state.runtime_state.get("contacts_sync_enqueued_count", 0),
-                "contacts_sync_pending_count": self.state.runtime_state.get("contacts_sync_pending_count", 0),
-                "contacts_sync_dead_count": self.state.runtime_state.get("contacts_sync_dead_count", 0),
+                "contacts_sync_state": self.state.runtime_state.get(
+                    "contacts_sync_state"
+                ),
+                "last_contacts_sync_at": self.state.runtime_state.get(
+                    "contacts_sync_completed_at"
+                ),
+                "contacts_sync_count": self.state.runtime_state.get(
+                    "contacts_sync_count", 0
+                ),
+                "contacts_sync_enqueued_count": self.state.runtime_state.get(
+                    "contacts_sync_enqueued_count", 0
+                ),
+                "contacts_sync_pending_count": self.state.runtime_state.get(
+                    "contacts_sync_pending_count", 0
+                ),
+                "contacts_sync_dead_count": self.state.runtime_state.get(
+                    "contacts_sync_dead_count", 0
+                ),
                 "unread_reactions_count": unread_reactions_count,
                 "me": me,
             }
 
     async def history_sync(
-        self, force: bool = True, reset_cursor: bool = False, include_contacts: bool = False
+        self,
+        force: bool = True,
+        reset_cursor: bool = False,
+        include_contacts: bool = False,
     ) -> Dict[str, Any]:
         async with self._lock:
             await self._ensure_client()
@@ -321,7 +403,9 @@ class ChannelRuntime:
                 await self._refresh_history_delivery_state(emit=True, force_emit=True)
                 if include_contacts:
                     self._retry_dead_contacts_delivery()
-                    await self._refresh_contacts_delivery_state(emit=True, force_emit=True)
+                    await self._refresh_contacts_delivery_state(
+                        emit=True, force_emit=True
+                    )
                 return self.state.snapshot()
             if include_contacts:
                 self._schedule_contacts_then_history_sync(
@@ -359,14 +443,20 @@ class ChannelRuntime:
             entity = await self._resolve_entity(payload.chat_id or payload.recipient_id)
             sent_message = None
             message_ids: list[str] = []
-            reply_to = int(payload.reply_to_message_id) if payload.reply_to_message_id else None
+            reply_to = (
+                int(payload.reply_to_message_id)
+                if payload.reply_to_message_id
+                else None
+            )
 
             if payload.attachments:
                 downloaded_attachments = [
                     (attachment, await self._download_attachment(attachment))
                     for attachment in payload.attachments
                 ]
-                source_paths = [source_path for _, source_path in downloaded_attachments]
+                source_paths = [
+                    source_path for _, source_path in downloaded_attachments
+                ]
                 if self._can_send_as_album(payload.attachments):
                     sent_messages = await self._client.send_file(
                         entity,
@@ -381,11 +471,15 @@ class ChannelRuntime:
                         sent_message = sent_messages
                         message_ids = [str(sent_messages.id)] if sent_messages else []
                 else:
-                    for index, (attachment, source_path) in enumerate(downloaded_attachments):
+                    for index, (attachment, source_path) in enumerate(
+                        downloaded_attachments
+                    ):
                         sent_message = await self._client.send_file(
                             entity,
                             source_path,
-                            caption=payload.text if index == 0 and payload.text else None,
+                            caption=(
+                                payload.text if index == 0 and payload.text else None
+                            ),
                             reply_to=reply_to if index == 0 else None,
                             **self._outbound_media_kwargs(attachment),
                         )
@@ -436,7 +530,9 @@ class ChannelRuntime:
             self._set_state("connected", "connected", None)
             await self._emit_runtime_update()
             return {
-                "message_id": str(edited_message.id) if edited_message else str(message_id),
+                "message_id": (
+                    str(edited_message.id) if edited_message else str(message_id)
+                ),
                 "channel": self.state.snapshot(),
             }
 
@@ -445,7 +541,11 @@ class ChannelRuntime:
             await self._ensure_client()
             await self._connect_if_needed()
             entity = await self._resolve_entity(payload.chat_id or payload.recipient_id)
-            message_ids = [int(message_id) for message_id in payload.message_ids if str(message_id).strip()]
+            message_ids = [
+                int(message_id)
+                for message_id in payload.message_ids
+                if str(message_id).strip()
+            ]
             if not message_ids:
                 raise ValueError("At least one message id must be provided")
             await self._client.delete_messages(entity, message_ids, revoke=True)
@@ -461,7 +561,11 @@ class ChannelRuntime:
         if self._client is not None:
             return
 
-        session = StringSession(self.state.string_session) if self.state.string_session else self._session_file
+        session = (
+            StringSession(self.state.string_session)
+            if self.state.string_session
+            else self._session_file
+        )
         self._client = TelegramClient(
             session,
             self.state.api_id,
@@ -476,10 +580,13 @@ class ChannelRuntime:
         if not self._handlers_registered:
             self._client.add_event_handler(self._on_new_message, events.NewMessage())
             self._client.add_event_handler(self._on_album, events.Album())
-            self._client.add_event_handler(self._on_message_edited, events.MessageEdited())
+            self._client.add_event_handler(
+                self._on_message_edited, events.MessageEdited()
+            )
             self._client.add_event_handler(self._on_message_read, events.MessageRead())
             self._client.add_event_handler(
-                self._on_message_reactions, events.Raw(types=types.UpdateMessageReactions)
+                self._on_message_reactions,
+                events.Raw(types=types.UpdateMessageReactions),
             )
             self._client.add_event_handler(
                 self._on_message_deleted, events.MessageDeleted()
@@ -500,7 +607,11 @@ class ChannelRuntime:
             )
         except errors.FloodWaitError as error:
             self.state.flood_wait_until = _iso_from_delta(error.seconds)
-            self._set_state("flood_wait", self.state.lifecycle_state, f"Flood wait: {error.seconds}s")
+            self._set_state(
+                "flood_wait",
+                self.state.lifecycle_state,
+                f"Flood wait: {error.seconds}s",
+            )
             raise
         except Exception as error:
             self._set_state("failed", self.state.lifecycle_state, str(error))
@@ -592,7 +703,9 @@ class ChannelRuntime:
                 self.state.channel_id,
             )
 
-    def _set_state(self, connection_state: str, lifecycle_state: str, last_error: Optional[str]) -> None:
+    def _set_state(
+        self, connection_state: str, lifecycle_state: str, last_error: Optional[str]
+    ) -> None:
         self.state.connection_state = connection_state
         self.state.lifecycle_state = lifecycle_state
         self.state.last_error = last_error
@@ -703,7 +816,9 @@ class ChannelRuntime:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("outbox delivery worker failed for channel=%s", self.state.channel_id)
+            logger.exception(
+                "outbox delivery worker failed for channel=%s", self.state.channel_id
+            )
 
     async def _deliver_outbox_event(self, outbox_event: OutboxEvent) -> None:
         try:
@@ -725,13 +840,17 @@ class ChannelRuntime:
                     delivery_attempts=next_attempt,
                     error_message=message,
                 )
-                await self._after_outbox_dead_letter(outbox_event, error_message=message)
+                await self._after_outbox_dead_letter(
+                    outbox_event, error_message=message
+                )
                 return
 
             self._store.mark_retry(
                 outbox_event.id,
                 delivery_attempts=next_attempt,
-                next_attempt_at=_iso_from_delta(self._outbox_backoff_seconds(next_attempt)),
+                next_attempt_at=_iso_from_delta(
+                    self._outbox_backoff_seconds(next_attempt)
+                ),
                 error_message=message,
             )
             await self._after_outbox_retry(outbox_event)
@@ -809,17 +928,19 @@ class ChannelRuntime:
                 self.state.runtime_state.pop("history_sync_completed_at", None)
             elif dead > 0:
                 self.state.runtime_state["history_sync_state"] = "completed_with_errors"
-                self.state.runtime_state["history_sync_completed_at"] = self.state.runtime_state.get(
-                    "history_sync_completed_at"
-                ) or _iso_now()
+                self.state.runtime_state["history_sync_completed_at"] = (
+                    self.state.runtime_state.get("history_sync_completed_at")
+                    or _iso_now()
+                )
                 self.state.runtime_state["history_sync_error"] = (
                     error_message or f"{dead} history callback deliveries failed"
                 )
             else:
                 self.state.runtime_state["history_sync_state"] = "completed"
-                self.state.runtime_state["history_sync_completed_at"] = self.state.runtime_state.get(
-                    "history_sync_completed_at"
-                ) or _iso_now()
+                self.state.runtime_state["history_sync_completed_at"] = (
+                    self.state.runtime_state.get("history_sync_completed_at")
+                    or _iso_now()
+                )
                 self.state.runtime_state.pop("history_sync_error", None)
 
         self._persist_runtime_state()
@@ -851,7 +972,9 @@ class ChannelRuntime:
             return
 
         previous_state = str(self.state.runtime_state.get("contacts_sync_state") or "")
-        previous_count = int(self.state.runtime_state.get("contacts_sync_count", 0) or 0)
+        previous_count = int(
+            self.state.runtime_state.get("contacts_sync_count", 0) or 0
+        )
         delivered = self._store.count_events(
             channel_id=self.state.channel_id,
             category=CONTACTS_OUTBOX_CATEGORY,
@@ -880,18 +1003,22 @@ class ChannelRuntime:
                 self.state.runtime_state["contacts_sync_state"] = "delivering"
                 self.state.runtime_state.pop("contacts_sync_completed_at", None)
             elif dead > 0:
-                self.state.runtime_state["contacts_sync_state"] = "completed_with_errors"
-                self.state.runtime_state["contacts_sync_completed_at"] = self.state.runtime_state.get(
-                    "contacts_sync_completed_at"
-                ) or _iso_now()
+                self.state.runtime_state["contacts_sync_state"] = (
+                    "completed_with_errors"
+                )
+                self.state.runtime_state["contacts_sync_completed_at"] = (
+                    self.state.runtime_state.get("contacts_sync_completed_at")
+                    or _iso_now()
+                )
                 self.state.runtime_state["contacts_sync_error"] = (
                     error_message or f"{dead} contact callback deliveries failed"
                 )
             else:
                 self.state.runtime_state["contacts_sync_state"] = "completed"
-                self.state.runtime_state["contacts_sync_completed_at"] = self.state.runtime_state.get(
-                    "contacts_sync_completed_at"
-                ) or _iso_now()
+                self.state.runtime_state["contacts_sync_completed_at"] = (
+                    self.state.runtime_state.get("contacts_sync_completed_at")
+                    or _iso_now()
+                )
                 self.state.runtime_state.pop("contacts_sync_error", None)
 
         queued_history_started = self._maybe_schedule_history_after_contacts()
@@ -929,13 +1056,23 @@ class ChannelRuntime:
 
     def _schedule_post_auth_sync(self, *, reason: str, force: bool = False) -> None:
         should_force = force or reason == "reconnect"
-        should_run_contacts = reason in {"sync", "verify_code", "verify_password", "qr_login", "reconnect"}
+        should_run_contacts = reason in {
+            "sync",
+            "verify_code",
+            "verify_password",
+            "qr_login",
+            "reconnect",
+        }
         should_run_history = reason in {"reconnect"}
 
-        if should_run_contacts and (should_force or self._should_auto_schedule_contacts_sync()):
+        if should_run_contacts and (
+            should_force or self._should_auto_schedule_contacts_sync()
+        ):
             self._schedule_contacts_sync(reason=reason, force=should_force)
 
-        if should_run_history and (should_force or self._should_auto_schedule_history_sync()):
+        if should_run_history and (
+            should_force or self._should_auto_schedule_history_sync()
+        ):
             self._schedule_history_sync(reason=reason, force=should_force)
 
     def _schedule_history_sync(
@@ -952,7 +1089,9 @@ class ChannelRuntime:
         self._clear_history_sync_terminal_state()
         self.state.runtime_state["history_sync_state"] = "scheduled"
         self.state.runtime_state["history_sync_reason"] = reason
-        self.state.runtime_state["history_sync_mode"] = "full" if reset_cursor else "incremental"
+        self.state.runtime_state["history_sync_mode"] = (
+            "full" if reset_cursor else "incremental"
+        )
         self.state.runtime_state["history_sync_requested_at"] = requested_at
         self.state.runtime_state["history_sync_reader_completed_at"] = None
         self._history_sync_task = asyncio.create_task(
@@ -970,14 +1109,18 @@ class ChannelRuntime:
         self.state.runtime_state["contacts_sync_reason"] = reason
         self.state.runtime_state["contacts_sync_requested_at"] = _iso_now()
         self.state.runtime_state["contacts_sync_reader_completed_at"] = None
-        self._contacts_sync_task = asyncio.create_task(self._run_contacts_sync(reason=reason))
+        self._contacts_sync_task = asyncio.create_task(
+            self._run_contacts_sync(reason=reason)
+        )
 
     def _queue_history_after_contacts(
         self, *, reason: str, force: bool = False, reset_cursor: bool = False
     ) -> None:
         self.state.runtime_state["history_sync_after_contacts_reason"] = reason
         self.state.runtime_state["history_sync_after_contacts_force"] = bool(force)
-        self.state.runtime_state["history_sync_after_contacts_reset_cursor"] = bool(reset_cursor)
+        self.state.runtime_state["history_sync_after_contacts_reset_cursor"] = bool(
+            reset_cursor
+        )
 
     def _queued_history_after_contacts(self) -> Optional[Dict[str, Any]]:
         reason = self.state.runtime_state.get("history_sync_after_contacts_reason")
@@ -985,8 +1128,12 @@ class ChannelRuntime:
             return None
         return {
             "reason": str(reason),
-            "force": bool(self.state.runtime_state.get("history_sync_after_contacts_force")),
-            "reset_cursor": bool(self.state.runtime_state.get("history_sync_after_contacts_reset_cursor")),
+            "force": bool(
+                self.state.runtime_state.get("history_sync_after_contacts_force")
+            ),
+            "reset_cursor": bool(
+                self.state.runtime_state.get("history_sync_after_contacts_reset_cursor")
+            ),
         }
 
     def _clear_queued_history_after_contacts(self) -> None:
@@ -1002,7 +1149,10 @@ class ChannelRuntime:
     ) -> None:
         should_run_contacts = (
             force
-            or (self._contacts_sync_task is not None and not self._contacts_sync_task.done())
+            or (
+                self._contacts_sync_task is not None
+                and not self._contacts_sync_task.done()
+            )
             or self._should_auto_schedule_contacts_sync()
         )
         if should_run_contacts:
@@ -1014,7 +1164,9 @@ class ChannelRuntime:
             self._schedule_contacts_sync(reason=reason, force=force)
             return
 
-        self._schedule_history_sync(reason=reason, force=force, reset_cursor=reset_cursor)
+        self._schedule_history_sync(
+            reason=reason, force=force, reset_cursor=reset_cursor
+        )
 
     def _maybe_schedule_history_after_contacts(self) -> bool:
         queued_history = self._queued_history_after_contacts()
@@ -1056,7 +1208,9 @@ class ChannelRuntime:
         try:
             self.state.runtime_state["history_sync_state"] = "running"
             self.state.runtime_state["history_sync_reason"] = reason
-            self.state.runtime_state["history_sync_mode"] = "full" if reset_cursor else "incremental"
+            self.state.runtime_state["history_sync_mode"] = (
+                "full" if reset_cursor else "incremental"
+            )
             self.state.runtime_state["history_sync_started_at"] = started_at
             self.state.runtime_state["history_sync_error"] = None
             await self._refresh_history_delivery_state()
@@ -1075,10 +1229,14 @@ class ChannelRuntime:
                 if str(user_id).strip()
             ]
             dialog_count = len(dialog_user_ids)
-            enqueued_payloads = int(self.state.runtime_state.get("history_sync_enqueued_count", 0) or 0)
+            enqueued_payloads = int(
+                self.state.runtime_state.get("history_sync_enqueued_count", 0) or 0
+            )
 
             self.state.runtime_state["history_dialog_count"] = dialog_count
-            self.state.runtime_state["history_sync_cutoff_at"] = _serialize_datetime(cutoff)
+            self.state.runtime_state["history_sync_cutoff_at"] = _serialize_datetime(
+                cutoff
+            )
 
             start_index = min(
                 max(int(checkpoint.get("next_dialog_index", 0) or 0), 0),
@@ -1091,7 +1249,9 @@ class ChannelRuntime:
                     str(dialog_user_id),
                     {},
                 )
-                last_enqueued_message_id = int(dialog_cursor.get("last_enqueued_message_id") or 0)
+                last_enqueued_message_id = int(
+                    dialog_cursor.get("last_enqueued_message_id") or 0
+                )
                 async for payload in self._iter_history_payloads_for_dialog_user_id(
                     dialog_user_id,
                     cutoff=cutoff,
@@ -1112,7 +1272,9 @@ class ChannelRuntime:
                     dialog_cursor["completed_at"] = None
                     if inserted:
                         enqueued_payloads += 1
-                        self.state.runtime_state["history_sync_enqueued_count"] = enqueued_payloads
+                        self.state.runtime_state["history_sync_enqueued_count"] = (
+                            enqueued_payloads
+                        )
                     self._set_history_sync_checkpoint(checkpoint)
                     if enqueued_payloads % HISTORY_PROGRESS_EMIT_EVERY == 0:
                         await self._emit_runtime_update()
@@ -1155,11 +1317,15 @@ class ChannelRuntime:
             await self._refresh_contacts_delivery_state()
             await self._emit_runtime_update()
 
-            enqueued_contacts = int(self.state.runtime_state.get("contacts_sync_enqueued_count", 0) or 0)
+            enqueued_contacts = int(
+                self.state.runtime_state.get("contacts_sync_enqueued_count", 0) or 0
+            )
             seen_user_ids: set[int] = set()
 
             if self._settings.contacts_include_saved:
-                result = await self._client(functions.contacts.GetContactsRequest(hash=0))
+                result = await self._client(
+                    functions.contacts.GetContactsRequest(hash=0)
+                )
                 for user in getattr(result, "users", []) or []:
                     payload = await self._contact_payload_from_user(
                         user,
@@ -1174,7 +1340,9 @@ class ChannelRuntime:
                     seen_user_ids.add(peer_user_id)
                     if inserted:
                         enqueued_contacts += 1
-                        self.state.runtime_state["contacts_sync_enqueued_count"] = enqueued_contacts
+                        self.state.runtime_state["contacts_sync_enqueued_count"] = (
+                            enqueued_contacts
+                        )
                     if enqueued_contacts % CONTACTS_PROGRESS_EMIT_EVERY == 0:
                         await self._emit_runtime_update()
 
@@ -1204,7 +1372,9 @@ class ChannelRuntime:
                     seen_user_ids.add(peer_user_id)
                     if inserted:
                         enqueued_contacts += 1
-                        self.state.runtime_state["contacts_sync_enqueued_count"] = enqueued_contacts
+                        self.state.runtime_state["contacts_sync_enqueued_count"] = (
+                            enqueued_contacts
+                        )
                     if enqueued_contacts % CONTACTS_PROGRESS_EMIT_EVERY == 0:
                         await self._emit_runtime_update()
 
@@ -1312,7 +1482,9 @@ class ChannelRuntime:
         now = datetime.now(timezone.utc)
         synced_until = _parse_iso(self.state.runtime_state.get("history_synced_until"))
         if synced_until:
-            return synced_until - timedelta(seconds=self._settings.history_overlap_seconds)
+            return synced_until - timedelta(
+                seconds=self._settings.history_overlap_seconds
+            )
         return now - timedelta(hours=self._settings.history_lookback_hours)
 
     async def _prepare_history_sync_checkpoint(
@@ -1377,7 +1549,11 @@ class ChannelRuntime:
         checkpoint = self._history_sync_checkpoint()
         dialog_user_ids = checkpoint.get("dialog_user_ids", [])
         next_dialog_index = int(checkpoint.get("next_dialog_index", 0) or 0)
-        if checkpoint.get("requested_at") and dialog_user_ids and next_dialog_index < len(dialog_user_ids):
+        if (
+            checkpoint.get("requested_at")
+            and dialog_user_ids
+            and next_dialog_index < len(dialog_user_ids)
+        ):
             return str(checkpoint["requested_at"])
 
         return _iso_now()
@@ -1390,12 +1566,16 @@ class ChannelRuntime:
         dialog_user_ids = checkpoint.get("dialog_user_ids")
         dialog_cursors = checkpoint.get("dialog_cursors")
         return {
-            "version": int(checkpoint.get("version") or HISTORY_SYNC_CHECKPOINT_VERSION),
+            "version": int(
+                checkpoint.get("version") or HISTORY_SYNC_CHECKPOINT_VERSION
+            ),
             "requested_at": checkpoint.get("requested_at"),
             "cutoff_at": checkpoint.get("cutoff_at"),
             "dialog_user_ids": [
                 str(user_id)
-                for user_id in (dialog_user_ids if isinstance(dialog_user_ids, list) else [])
+                for user_id in (
+                    dialog_user_ids if isinstance(dialog_user_ids, list) else []
+                )
                 if str(user_id).strip()
             ],
             "dialog_cursors": self._normalize_dialog_cursors(dialog_cursors),
@@ -1405,23 +1585,31 @@ class ChannelRuntime:
         }
 
     def _set_history_sync_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        self.state.runtime_state["history_sync_checkpoint"] = self._history_sync_checkpoint_from_payload(
-            checkpoint
+        self.state.runtime_state["history_sync_checkpoint"] = (
+            self._history_sync_checkpoint_from_payload(checkpoint)
         )
         self._persist_runtime_state()
 
-    def _history_sync_checkpoint_from_payload(self, checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    def _history_sync_checkpoint_from_payload(
+        self, checkpoint: Dict[str, Any]
+    ) -> Dict[str, Any]:
         dialog_user_ids = checkpoint.get("dialog_user_ids")
         return {
-            "version": int(checkpoint.get("version") or HISTORY_SYNC_CHECKPOINT_VERSION),
+            "version": int(
+                checkpoint.get("version") or HISTORY_SYNC_CHECKPOINT_VERSION
+            ),
             "requested_at": checkpoint.get("requested_at"),
             "cutoff_at": checkpoint.get("cutoff_at"),
             "dialog_user_ids": [
                 str(user_id)
-                for user_id in (dialog_user_ids if isinstance(dialog_user_ids, list) else [])
+                for user_id in (
+                    dialog_user_ids if isinstance(dialog_user_ids, list) else []
+                )
                 if str(user_id).strip()
             ],
-            "dialog_cursors": self._normalize_dialog_cursors(checkpoint.get("dialog_cursors")),
+            "dialog_cursors": self._normalize_dialog_cursors(
+                checkpoint.get("dialog_cursors")
+            ),
             "next_dialog_index": max(int(checkpoint.get("next_dialog_index") or 0), 0),
             "last_completed_dialog_id": checkpoint.get("last_completed_dialog_id"),
             "last_checkpoint_at": checkpoint.get("last_checkpoint_at"),
@@ -1436,13 +1624,17 @@ class ChannelRuntime:
             if not str(dialog_user_id).strip() or not isinstance(cursor, dict):
                 continue
             normalized[str(dialog_user_id)] = {
-                "last_enqueued_message_id": int(cursor.get("last_enqueued_message_id") or 0),
+                "last_enqueued_message_id": int(
+                    cursor.get("last_enqueued_message_id") or 0
+                ),
                 "completed_at": cursor.get("completed_at"),
                 "last_checkpoint_at": cursor.get("last_checkpoint_at"),
             }
         return normalized
 
-    def _merge_runtime_state(self, incoming_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def _merge_runtime_state(
+        self, incoming_state: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         incoming = dict(incoming_state or {})
         local = dict(self.state.runtime_state or {})
         if not local:
@@ -1523,8 +1715,12 @@ class ChannelRuntime:
             **self._serialize_user_profile(user),
             "avatar_url": avatar_url,
             "sync_source": sync_source,
-            "last_message_at": _serialize_datetime(getattr(dialog, "date", None)) if dialog else None,
-            "unread_count": int(getattr(dialog, "unread_count", 0) or 0) if dialog else 0,
+            "last_message_at": (
+                _serialize_datetime(getattr(dialog, "date", None)) if dialog else None
+            ),
+            "unread_count": (
+                int(getattr(dialog, "unread_count", 0) or 0) if dialog else 0
+            ),
         }
 
     def _should_sync_dialog(self, dialog: Any) -> bool:
@@ -1589,7 +1785,10 @@ class ChannelRuntime:
             if grouped_id:
                 grouped_messages = [message]
                 index += 1
-                while index < len(messages) and getattr(messages[index], "grouped_id", None) == grouped_id:
+                while (
+                    index < len(messages)
+                    and getattr(messages[index], "grouped_id", None) == grouped_id
+                ):
                     grouped_messages.append(messages[index])
                     index += 1
                 payloads.append(await self._serialize_history_album(grouped_messages))
@@ -1600,12 +1799,12 @@ class ChannelRuntime:
 
         return payloads
 
-    async def _serialize_history_album(
-        self, messages: list[Any]
-    ) -> Dict[str, Any]:
+    async def _serialize_history_album(self, messages: list[Any]) -> Dict[str, Any]:
         first_message = messages[0]
         sender = await first_message.get_sender()
-        profile_user = await self._private_dialog_profile_user(first_message, sender=sender)
+        profile_user = await self._private_dialog_profile_user(
+            first_message, sender=sender
+        )
         peer_user_id = self._private_dialog_user_id(first_message, sender=sender)
         avatar_url = await self._profile_photo_url(profile_user or sender)
         reply_to = getattr(first_message.reply_to, "reply_to_msg_id", None)
@@ -1620,8 +1819,12 @@ class ChannelRuntime:
         return {
             "message_id": first_message.id,
             "telegram_message_ids": message_ids,
-            "grouped_id": str(first_message.grouped_id) if first_message.grouped_id else None,
-            "message_created_at": _serialize_datetime(getattr(first_message, "date", None)),
+            "grouped_id": (
+                str(first_message.grouped_id) if first_message.grouped_id else None
+            ),
+            "message_created_at": _serialize_datetime(
+                getattr(first_message, "date", None)
+            ),
             "chat_id": str(peer_user_id) if peer_user_id else None,
             "peer_user_id": str(peer_user_id) if peer_user_id else None,
             "sender_id": str(getattr(sender, "id", None)) if sender else None,
@@ -1766,7 +1969,9 @@ class ChannelRuntime:
                 self.state.channel_id,
             )
 
-    async def _handle_message_event(self, *, event: events.common.EventCommon, event_name: str) -> None:
+    async def _handle_message_event(
+        self, *, event: events.common.EventCommon, event_name: str
+    ) -> None:
         if not await self._is_private_user_message(event):
             return
         try:
@@ -1877,6 +2082,7 @@ class ChannelRuntime:
                 "last_name": getattr(user, "last_name", None),
                 "username": getattr(user, "username", None),
                 "language_code": getattr(user, "lang_code", None),
+                "avatar_fingerprint": self._profile_photo_fingerprint(user),
             }
 
         phone_number = getattr(user, "phone", None)
@@ -1895,6 +2101,7 @@ class ChannelRuntime:
             "is_fake": bool(getattr(user, "fake", False)),
             "is_restricted": bool(getattr(user, "restricted", False)),
             "is_deleted": bool(getattr(user, "deleted", False)),
+            "avatar_fingerprint": self._profile_photo_fingerprint(user),
         }
 
     def _activity_type_for_message(self, message: types.Message) -> Optional[str]:
@@ -2013,25 +2220,37 @@ class ChannelRuntime:
             return {"type": "paid"}
         return {"type": reaction.__class__.__name__}
 
-    def _serialize_forwarded_from(self, message: types.Message) -> Optional[Dict[str, Any]]:
+    def _serialize_forwarded_from(
+        self, message: types.Message
+    ) -> Optional[Dict[str, Any]]:
         fwd_from = getattr(message, "fwd_from", None)
         if fwd_from is None:
             return None
 
         forwarded_from = {
-            "from_id": self._serialize_peer_identifier(getattr(fwd_from, "from_id", None)),
+            "from_id": self._serialize_peer_identifier(
+                getattr(fwd_from, "from_id", None)
+            ),
             "from_name": getattr(fwd_from, "from_name", None),
             "date": _serialize_datetime(getattr(fwd_from, "date", None)),
             "post_author": getattr(fwd_from, "post_author", None),
-            "saved_from_peer": self._serialize_peer_identifier(getattr(fwd_from, "saved_from_peer", None)),
-            "saved_from_msg_id": str(getattr(fwd_from, "saved_from_msg_id", None))
-            if getattr(fwd_from, "saved_from_msg_id", None)
-            else None,
-            "channel_post": str(getattr(fwd_from, "channel_post", None))
-            if getattr(fwd_from, "channel_post", None)
-            else None,
+            "saved_from_peer": self._serialize_peer_identifier(
+                getattr(fwd_from, "saved_from_peer", None)
+            ),
+            "saved_from_msg_id": (
+                str(getattr(fwd_from, "saved_from_msg_id", None))
+                if getattr(fwd_from, "saved_from_msg_id", None)
+                else None
+            ),
+            "channel_post": (
+                str(getattr(fwd_from, "channel_post", None))
+                if getattr(fwd_from, "channel_post", None)
+                else None
+            ),
         }
-        compact = {key: value for key, value in forwarded_from.items() if value is not None}
+        compact = {
+            key: value for key, value in forwarded_from.items() if value is not None
+        }
         return compact or None
 
     def _serialize_peer_identifier(self, peer: Any) -> Optional[Dict[str, Any]]:
@@ -2043,12 +2262,12 @@ class ChannelRuntime:
             return {"type": "chat", "id": str(peer.chat_id)}
         return None
 
-    async def _serialize_album_event(
-        self, event: events.Album.Event
-    ) -> Dict[str, Any]:
+    async def _serialize_album_event(self, event: events.Album.Event) -> Dict[str, Any]:
         first_message = event.messages[0]
         sender = await first_message.get_sender()
-        profile_user = await self._private_dialog_profile_user(first_message, sender=sender)
+        profile_user = await self._private_dialog_profile_user(
+            first_message, sender=sender
+        )
         peer_user_id = self._private_dialog_user_id(first_message, sender=sender)
         avatar_url = await self._profile_photo_url(profile_user or sender)
         reply_to = getattr(first_message.reply_to, "reply_to_msg_id", None)
@@ -2064,7 +2283,9 @@ class ChannelRuntime:
             "message_id": first_message.id,
             "telegram_message_ids": message_ids,
             "grouped_id": str(event.grouped_id) if event.grouped_id else None,
-            "message_created_at": _serialize_datetime(getattr(first_message, "date", None)),
+            "message_created_at": _serialize_datetime(
+                getattr(first_message, "date", None)
+            ),
             "chat_id": str(peer_user_id) if peer_user_id else None,
             "peer_user_id": str(peer_user_id) if peer_user_id else None,
             "sender_id": str(getattr(sender, "id", None)) if sender else None,
@@ -2082,7 +2303,9 @@ class ChannelRuntime:
             "avatar_url": avatar_url,
         }
 
-    def _private_dialog_user_id(self, message: Any, *, sender: Any = None) -> Optional[int]:
+    def _private_dialog_user_id(
+        self, message: Any, *, sender: Any = None
+    ) -> Optional[int]:
         peer = getattr(message, "peer_id", None)
         if isinstance(peer, types.PeerUser):
             return int(peer.user_id)
@@ -2120,7 +2343,10 @@ class ChannelRuntime:
                     peer_user_id,
                 )
 
-        if isinstance(sender, types.User) and getattr(sender, "id", None) == peer_user_id:
+        if (
+            isinstance(sender, types.User)
+            and getattr(sender, "id", None) == peer_user_id
+        ):
             return sender
 
         try:
@@ -2138,7 +2364,9 @@ class ChannelRuntime:
 
     async def _extract_media(
         self, message: types.Message
-    ) -> tuple[list[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    ) -> tuple[
+        list[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]
+    ]:
         media = message.media
         attachments: list[Dict[str, Any]] = []
         location = None
@@ -2153,7 +2381,8 @@ class ChannelRuntime:
             location = {
                 "latitude": media.geo.lat,
                 "longitude": media.geo.long,
-                "name": getattr(media, "title", None) or getattr(media, "address", None),
+                "name": getattr(media, "title", None)
+                or getattr(media, "address", None),
                 "address": getattr(media, "address", None),
                 "provider": getattr(media, "provider", None),
                 "venue_id": getattr(media, "venue_id", None),
@@ -2175,20 +2404,23 @@ class ChannelRuntime:
                 file=str(Path(tempfile.gettempdir()) / f"telegram-media-{uuid4_hex()}"),
             )
             if source_path:
-                kind, filename, content_type = _media_kind_and_name(media)
-                stored = self._media_store.store_path(
-                    source_path=source_path,
-                    filename=filename,
-                    content_type=content_type,
-                )
-                attachments.append(
-                    {
-                        "kind": kind,
-                        "url": self._media_store.signed_url(stored.media_id),
-                        "filename": stored.filename,
-                        "content_type": stored.content_type,
-                    }
-                )
+                try:
+                    kind, filename, content_type = _media_kind_and_name(media)
+                    stored = self._media_store.store_path(
+                        source_path=source_path,
+                        filename=filename,
+                        content_type=content_type,
+                    )
+                    attachments.append(
+                        {
+                            "kind": kind,
+                            "url": self._media_store.signed_url(stored.media_id),
+                            "filename": stored.filename,
+                            "content_type": stored.content_type,
+                        }
+                    )
+                finally:
+                    Path(source_path).unlink(missing_ok=True)
 
         return attachments, location, contact
 
@@ -2198,36 +2430,102 @@ class ChannelRuntime:
         cache_key = self._profile_photo_cache_key(sender)
         if cache_key and cache_key in self._profile_photo_url_cache:
             return self._profile_photo_url_cache[cache_key]
+        avatar_stored, stored = await self._download_profile_photo_assets(
+            sender,
+            avatar_fingerprint=self._profile_photo_fingerprint(sender),
+        )
+        del avatar_stored
+        if stored is None:
+            self._remember_profile_photo_url(sender, None)
+            return None
+
+        signed_url = self._media_store.signed_url(stored.media_id)
+        self._remember_profile_photo_url(sender, signed_url)
+        return signed_url
+
+    async def _download_profile_photo_assets(
+        self,
+        sender: Any,
+        *,
+        avatar_fingerprint: Optional[str],
+        store_transient_media: bool = True,
+    ):
+        peer_user_id = getattr(sender, "id", None)
         profile_path = await self._client.download_profile_photo(
             sender,
             file=str(Path(tempfile.gettempdir()) / f"telegram-avatar-{uuid4_hex()}"),
             download_big=False,
         )
         if not profile_path:
-            if cache_key:
-                self._profile_photo_url_cache[cache_key] = None
-            return None
-        stored = self._media_store.store_path(
-            source_path=profile_path,
-            filename=Path(profile_path).name,
-            content_type=mimetypes.guess_type(str(profile_path))[0] or "image/jpeg",
-        )
-        signed_url = self._media_store.signed_url(stored.media_id)
-        if cache_key:
-            self._profile_photo_url_cache[cache_key] = signed_url
-        return signed_url
+            return None, None
+
+        avatar_stored = None
+        transient_stored = None
+        try:
+            content_type = mimetypes.guess_type(str(profile_path))[0] or "image/jpeg"
+            if avatar_fingerprint and peer_user_id is not None:
+                avatar_stored = self._media_store.store_profile_avatar_path(
+                    channel_id=self.state.channel_id,
+                    peer_user_id=str(peer_user_id),
+                    avatar_fingerprint=avatar_fingerprint,
+                    source_path=profile_path,
+                    filename=Path(profile_path).name,
+                    content_type=content_type,
+                )
+            if store_transient_media:
+                transient_stored = self._media_store.store_path(
+                    source_path=profile_path,
+                    filename=Path(profile_path).name,
+                    content_type=content_type,
+                )
+            return avatar_stored, transient_stored
+        finally:
+            Path(profile_path).unlink(missing_ok=True)
+
+    def _remember_profile_photo_url(self, sender: Any, url: Optional[str]) -> None:
+        cache_key = self._profile_photo_cache_key(sender)
+        cache_prefix = self._profile_photo_cache_prefix(sender)
+        if cache_key is None or cache_prefix is None:
+            return
+
+        stale_keys = [
+            key
+            for key in self._profile_photo_url_cache
+            if key.startswith(cache_prefix) and key != cache_key
+        ]
+        for key in stale_keys:
+            self._profile_photo_url_cache.pop(key, None)
+        self._profile_photo_url_cache[cache_key] = url
 
     def _profile_photo_cache_key(self, sender: Any) -> Optional[str]:
+        cache_prefix = self._profile_photo_cache_prefix(sender)
+        if cache_prefix is None:
+            return None
+
+        avatar_fingerprint = self._profile_photo_fingerprint(sender) or "none"
+        return f"{cache_prefix}{avatar_fingerprint}"
+
+    def _profile_photo_cache_prefix(self, sender: Any) -> Optional[str]:
         sender_id = getattr(sender, "id", None)
         if sender_id is None:
             return None
-        return f"{sender.__class__.__name__}:{sender_id}"
+        return f"{sender.__class__.__name__}:{sender_id}:"
+
+    def _profile_photo_fingerprint(self, sender: Any) -> Optional[str]:
+        photo = getattr(sender, "photo", None)
+        photo_id = getattr(photo, "photo_id", None)
+        if photo_id is None:
+            return None
+        return str(photo_id)
 
     async def _download_attachment(self, attachment: Any) -> str:
         url = str(getattr(attachment, "url", ""))
         response = await self._http_client.get(url)
         response.raise_for_status()
-        target = Path(tempfile.gettempdir()) / f"telegram-outbound-{uuid4_hex()}{self._attachment_suffix(attachment)}"
+        target = (
+            Path(tempfile.gettempdir())
+            / f"telegram-outbound-{uuid4_hex()}{self._attachment_suffix(attachment)}"
+        )
         target.write_bytes(response.content)
         return str(target)
 
@@ -2243,7 +2541,9 @@ class ChannelRuntime:
         if remote_suffix:
             return remote_suffix
 
-        content_type = str(getattr(attachment, "content_type", "") or "").split(";")[0].strip()
+        content_type = (
+            str(getattr(attachment, "content_type", "") or "").split(";")[0].strip()
+        )
         if content_type:
             guessed_suffix = mimetypes.guess_extension(content_type)
             if guessed_suffix:
@@ -2257,7 +2557,9 @@ class ChannelRuntime:
 
     def _outbound_media_kwargs(self, attachment: Any) -> dict[str, Any]:
         file_type = getattr(attachment, "file_type", None)
-        content_type = str(getattr(attachment, "content_type", "") or "").split(";")[0].strip()
+        content_type = (
+            str(getattr(attachment, "content_type", "") or "").split(";")[0].strip()
+        )
         voice_note = bool(getattr(attachment, "voice_note", False))
 
         kwargs: dict[str, Any] = {}
@@ -2305,7 +2607,10 @@ class ChannelRuntime:
             return False
 
         allowed_types = {"image", "video"}
-        return all(getattr(attachment, "file_type", None) in allowed_types for attachment in attachments)
+        return all(
+            getattr(attachment, "file_type", None) in allowed_types
+            for attachment in attachments
+        )
 
     async def _edit_existing_message(
         self,
@@ -2364,7 +2669,9 @@ class RuntimeManager:
             raise KeyError(f"Channel {channel_id} is not synced")
         return runtime
 
-    async def sync(self, channel_id: int, payload: ChannelSyncPayload) -> Dict[str, Any]:
+    async def sync(
+        self, channel_id: int, payload: ChannelSyncPayload
+    ) -> Dict[str, Any]:
         runtime = self._runtimes.get(channel_id)
         if runtime is None:
             persisted_runtime_state = self._store.load_runtime_state(channel_id)
@@ -2377,7 +2684,9 @@ class RuntimeManager:
                     string_session=payload.string_session or "",
                     callback_url=str(payload.callback_url),
                     webhook_secret=payload.webhook_secret,
-                    runtime_state=dict(persisted_runtime_state or payload.runtime_state or {}),
+                    runtime_state=dict(
+                        persisted_runtime_state or payload.runtime_state or {}
+                    ),
                 ),
                 settings=self._settings,
                 callbacks=self._callbacks,
@@ -2418,7 +2727,9 @@ class RuntimeManager:
             )
         }
 
-    async def contacts_sync(self, channel_id: int, force: bool = True) -> Dict[str, Any]:
+    async def contacts_sync(
+        self, channel_id: int, force: bool = True
+    ) -> Dict[str, Any]:
         return {"channel": await self._runtime(channel_id).contacts_sync(force=force)}
 
     async def disconnect(self, channel_id: int) -> Dict[str, Any]:
@@ -2435,16 +2746,42 @@ class RuntimeManager:
     async def diagnostics(self, channel_id: int) -> Dict[str, Any]:
         return await self._runtime(channel_id).diagnostics()
 
-    async def send_message(self, channel_id: int, payload: SendMessagePayload) -> Dict[str, Any]:
+    async def fetch_profile_avatar(
+        self, channel_id: int, *, peer_user_id: str, avatar_fingerprint: str
+    ):
+        try:
+            return self._media_store.get_profile_avatar(
+                channel_id=channel_id,
+                peer_user_id=peer_user_id,
+                avatar_fingerprint=avatar_fingerprint,
+            )
+        except FileNotFoundError:
+            runtime = self._runtimes.get(channel_id)
+            if runtime is None:
+                raise KeyError(f"Channel {channel_id} is not synced")
+            return await runtime.fetch_profile_avatar(
+                peer_user_id=peer_user_id,
+                avatar_fingerprint=avatar_fingerprint,
+            )
+
+    async def send_message(
+        self, channel_id: int, payload: SendMessagePayload
+    ) -> Dict[str, Any]:
         return await self._runtime(channel_id).send_message(payload)
 
-    async def edit_message(self, channel_id: int, payload: EditMessagePayload) -> Dict[str, Any]:
+    async def edit_message(
+        self, channel_id: int, payload: EditMessagePayload
+    ) -> Dict[str, Any]:
         return await self._runtime(channel_id).edit_message(payload)
 
-    async def delete_messages(self, channel_id: int, payload: DeleteMessagesPayload) -> Dict[str, Any]:
+    async def delete_messages(
+        self, channel_id: int, payload: DeleteMessagesPayload
+    ) -> Dict[str, Any]:
         return await self._runtime(channel_id).delete_messages(payload)
 
-    async def mark_read(self, channel_id: int, payload: MarkReadPayload) -> Dict[str, Any]:
+    async def mark_read(
+        self, channel_id: int, payload: MarkReadPayload
+    ) -> Dict[str, Any]:
         return await self._runtime(channel_id).mark_read(payload)
 
 
@@ -2544,7 +2881,9 @@ def _humanize_telegram_error(error: Exception) -> str:
             "Use the last code you received or wait before requesting a new one."
         )
     if isinstance(error, errors.FloodWaitError):
-        return f"Telegram rate limit reached. Wait {error.seconds} seconds and try again."
+        return (
+            f"Telegram rate limit reached. Wait {error.seconds} seconds and try again."
+        )
     return str(error)
 
 

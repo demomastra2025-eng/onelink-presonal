@@ -136,6 +136,7 @@ class GatewayPrivateProfileSerializationTest(unittest.IsolatedAsyncioTestCase):
             last_name="Менеджер",
             username="Bakhitov",
             phone="77066318623",
+            photo=types.UserProfilePhoto(photo_id=9001001, dc_id=2),
         )
         peer_user = types.User(
             id=134527512,
@@ -144,6 +145,7 @@ class GatewayPrivateProfileSerializationTest(unittest.IsolatedAsyncioTestCase):
             last_name="Теле2",
             username="tele2",
             phone="77475318623",
+            photo=types.UserProfilePhoto(photo_id=134527512001, dc_id=2),
         )
         runtime = await self.build_runtime(_FakeClient(peer_user=peer_user))
         self.addAsyncCleanup(runtime.close)
@@ -166,6 +168,7 @@ class GatewayPrivateProfileSerializationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("tele2", payload["username"])
         self.assertEqual("77475318623", payload["phone_number"])
         self.assertEqual("https://avatar.test/134527512", payload["avatar_url"])
+        self.assertEqual("134527512001", payload["avatar_fingerprint"])
 
     async def test_serialize_album_event_uses_private_dialog_peer_profile(self):
         sender = types.User(
@@ -175,6 +178,7 @@ class GatewayPrivateProfileSerializationTest(unittest.IsolatedAsyncioTestCase):
             last_name="Менеджер",
             username="Bakhitov",
             phone="77066318623",
+            photo=types.UserProfilePhoto(photo_id=9001001, dc_id=2),
         )
         peer_user = types.User(
             id=134527512,
@@ -183,6 +187,7 @@ class GatewayPrivateProfileSerializationTest(unittest.IsolatedAsyncioTestCase):
             last_name="Теле2",
             username="tele2",
             phone="77475318623",
+            photo=types.UserProfilePhoto(photo_id=134527512001, dc_id=2),
         )
         runtime = await self.build_runtime(_FakeClient(peer_user=peer_user))
         self.addAsyncCleanup(runtime.close)
@@ -206,3 +211,4 @@ class GatewayPrivateProfileSerializationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("tele2", payload["username"])
         self.assertEqual("77475318623", payload["phone_number"])
         self.assertEqual("https://avatar.test/134527512", payload["avatar_url"])
+        self.assertEqual("134527512001", payload["avatar_fingerprint"])

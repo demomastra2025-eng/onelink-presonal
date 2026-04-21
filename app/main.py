@@ -70,6 +70,14 @@ async def handle_value_error(_: Request, exc: ValueError):
     )
 
 
+@app.exception_handler(FileNotFoundError)
+async def handle_file_not_found(_: Request, exc: FileNotFoundError):
+    return JSONResponse(
+        status_code=404,
+        content={"error": str(exc)},
+    )
+
+
 @app.exception_handler(errors.RPCError)
 async def handle_telegram_rpc_error(_: Request, exc: errors.RPCError):
     return JSONResponse(
@@ -88,7 +96,10 @@ async def health():
     }
 
 
-@app.post("/internal/channels/{channel_id}/sync", dependencies=[Depends(verify_internal_token)])
+@app.post(
+    "/internal/channels/{channel_id}/sync",
+    dependencies=[Depends(verify_internal_token)],
+)
 async def sync_channel(channel_id: int, payload: ChannelSyncPayload):
     return await runtime_manager.sync(channel_id, payload)
 
@@ -137,7 +148,9 @@ async def reconnect_channel(channel_id: int):
     "/internal/channels/{channel_id}/history-sync",
     dependencies=[Depends(verify_internal_token)],
 )
-async def history_sync_channel(channel_id: int, payload: HistorySyncPayload | None = None):
+async def history_sync_channel(
+    channel_id: int, payload: HistorySyncPayload | None = None
+):
     payload = payload or HistorySyncPayload()
     return await runtime_manager.history_sync(
         channel_id,
@@ -151,7 +164,9 @@ async def history_sync_channel(channel_id: int, payload: HistorySyncPayload | No
     "/internal/channels/{channel_id}/contacts-sync",
     dependencies=[Depends(verify_internal_token)],
 )
-async def contacts_sync_channel(channel_id: int, payload: ContactsSyncPayload | None = None):
+async def contacts_sync_channel(
+    channel_id: int, payload: ContactsSyncPayload | None = None
+):
     payload = payload or ContactsSyncPayload()
     return await runtime_manager.contacts_sync(channel_id, force=payload.force)
 
@@ -212,6 +227,23 @@ async def mark_read(channel_id: int, payload: MarkReadPayload):
     return await runtime_manager.mark_read(channel_id, payload)
 
 
+@app.get(
+    "/internal/channels/{channel_id}/contacts/{peer_user_id}/avatar",
+    dependencies=[Depends(verify_internal_token)],
+)
+async def get_profile_avatar(channel_id: int, peer_user_id: str, fingerprint: str):
+    stored = await runtime_manager.fetch_profile_avatar(
+        channel_id,
+        peer_user_id=peer_user_id,
+        avatar_fingerprint=fingerprint,
+    )
+    return FileResponse(
+        stored.path,
+        media_type=stored.content_type,
+        filename=stored.filename,
+    )
+
+
 @app.get("/media/{media_id}")
 async def get_media(media_id: str, token: str):
     stored = runtime_manager.media_store.get(media_id, token)
@@ -223,4 +255,6 @@ async def get_media(media_id: str, token: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host=settings.host, port=settings.port, log_level="info")
+    uvicorn.run(
+        "app.main:app", host=settings.host, port=settings.port, log_level="info"
+    )

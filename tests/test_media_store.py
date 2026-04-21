@@ -9,12 +9,19 @@ from app.media_store import MediaStore
 
 
 class MediaStoreTest(unittest.TestCase):
-    def build_settings(self, root: Path, *, media_ttl_seconds: int = 900) -> GatewaySettings:
+    def build_settings(
+        self,
+        root: Path,
+        *,
+        media_ttl_seconds: int = 900,
+        avatar_ttl_seconds: int = 2_592_000,
+    ) -> GatewaySettings:
         return GatewaySettings(
             internal_token="token",
             public_base_url="http://127.0.0.1:8000",
             media_secret="media-secret",
             media_ttl_seconds=media_ttl_seconds,
+            avatar_ttl_seconds=avatar_ttl_seconds,
             state_db_path=root / "state.sqlite3",
             callback_timeout_seconds=1,
             callback_max_retries=1,
@@ -109,9 +116,69 @@ class MediaStoreTest(unittest.TestCase):
             media_dir = settings.media_dir
             media_dir.mkdir(parents=True, exist_ok=True)
             media_id = "broken-media"
-            (media_dir / f"{media_id}.json").write_text('["bad-shape"]', encoding="utf-8")
+            (media_dir / f"{media_id}.json").write_text(
+                '["bad-shape"]', encoding="utf-8"
+            )
 
             store = MediaStore(settings)
 
             self.assertIsNone(store._load_from_disk(media_id))
             self.assertFalse((media_dir / f"{media_id}.json").exists())
+
+    def test_profile_avatar_survives_media_store_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = self.build_settings(root)
+            source = root / "avatar.jpg"
+            source.write_bytes(b"avatar-bytes")
+
+            first_store = MediaStore(settings)
+            stored = first_store.store_profile_avatar_path(
+                channel_id=42,
+                peer_user_id="23",
+                avatar_fingerprint="telegram-photo-23",
+                source_path=source,
+                filename="avatar.jpg",
+                content_type="image/jpeg",
+            )
+
+            restarted_store = MediaStore(settings)
+            reloaded = restarted_store.get_profile_avatar(
+                channel_id=42,
+                peer_user_id="23",
+                avatar_fingerprint="telegram-photo-23",
+            )
+
+            self.assertEqual(stored.filename, reloaded.filename)
+            self.assertEqual("image/jpeg", reloaded.content_type)
+            self.assertTrue(reloaded.path.exists())
+            self.assertEqual(b"avatar-bytes", reloaded.path.read_bytes())
+
+    def test_cleanup_expired_profile_avatars_removes_disk_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = self.build_settings(root, avatar_ttl_seconds=1)
+            source = root / "avatar.jpg"
+            source.write_bytes(b"avatar-bytes")
+
+            store = MediaStore(settings)
+            stored = store.store_profile_avatar_path(
+                channel_id=42,
+                peer_user_id="23",
+                avatar_fingerprint="telegram-photo-23",
+                source_path=source,
+                filename="avatar.jpg",
+                content_type="image/jpeg",
+            )
+
+            time.sleep(2)
+            store.cleanup_expired_profile_avatars()
+
+            self.assertFalse(stored.path.exists())
+            self.assertFalse(
+                store.has_profile_avatar(
+                    channel_id=42,
+                    peer_user_id="23",
+                    avatar_fingerprint="telegram-photo-23",
+                )
+            )

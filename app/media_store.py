@@ -1,3 +1,4 @@
+import hashlib
 import json
 import mimetypes
 import shutil
@@ -24,13 +25,44 @@ class MediaStore:
     def __init__(self, settings: GatewaySettings):
         self._settings = settings
         self._media: Dict[str, StoredMedia] = {}
+        self._profile_avatars: Dict[str, StoredMedia] = {}
         self._settings.media_dir.mkdir(parents=True, exist_ok=True)
+        self._profile_avatar_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def _profile_avatar_dir(self) -> Path:
+        return self._settings.media_dir / "avatars"
 
     def _metadata_path(self, media_id: str) -> Path:
         return self._settings.media_dir / f"{media_id}.json"
 
+    def _profile_avatar_key(
+        self, *, channel_id: int, peer_user_id: str, avatar_fingerprint: str
+    ) -> str:
+        payload = f"{channel_id}:{peer_user_id}:{avatar_fingerprint}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _profile_avatar_metadata_path(self, avatar_key: str) -> Path:
+        return self._profile_avatar_dir / f"{avatar_key}.json"
+
     def _write_metadata(self, stored: StoredMedia) -> None:
         self._metadata_path(stored.media_id).write_text(
+            json.dumps(
+                {
+                    "media_id": stored.media_id,
+                    "path": stored.path.name,
+                    "filename": stored.filename,
+                    "content_type": stored.content_type,
+                    "expires_at": stored.expires_at,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _write_profile_avatar_metadata(
+        self, avatar_key: str, stored: StoredMedia
+    ) -> None:
+        self._profile_avatar_metadata_path(avatar_key).write_text(
             json.dumps(
                 {
                     "media_id": stored.media_id,
@@ -83,6 +115,49 @@ class MediaStore:
         self._media.pop(media_id, None)
         self._metadata_path(media_id).unlink(missing_ok=True)
 
+    def _load_profile_avatar(self, avatar_key: str) -> StoredMedia | None:
+        metadata_path = self._profile_avatar_metadata_path(avatar_key)
+        if not metadata_path.exists():
+            return None
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata_path.unlink(missing_ok=True)
+            return None
+
+        payload = self._coerce_metadata_payload(payload)
+        if payload is None:
+            metadata_path.unlink(missing_ok=True)
+            return None
+
+        relative_path = payload.get("path")
+        if not relative_path:
+            metadata_path.unlink(missing_ok=True)
+            return None
+        stored_path = self._profile_avatar_dir / relative_path
+        if not stored_path.exists():
+            metadata_path.unlink(missing_ok=True)
+            return None
+
+        stored = StoredMedia(
+            media_id=payload.get("media_id") or avatar_key,
+            path=stored_path,
+            filename=payload.get("filename") or stored_path.name,
+            content_type=payload.get("content_type") or "application/octet-stream",
+            expires_at=int(payload.get("expires_at") or 0),
+        )
+        self._profile_avatars[avatar_key] = stored
+        return stored
+
+    def _delete_profile_avatar(
+        self, avatar_key: str, stored: StoredMedia | None = None
+    ) -> None:
+        stored = stored or self._profile_avatars.get(avatar_key)
+        if stored and stored.path.exists():
+            stored.path.unlink(missing_ok=True)
+        self._profile_avatars.pop(avatar_key, None)
+        self._profile_avatar_metadata_path(avatar_key).unlink(missing_ok=True)
+
     def store_path(
         self,
         *,
@@ -112,6 +187,48 @@ class MediaStore:
         self._write_metadata(stored)
         return stored
 
+    def store_profile_avatar_path(
+        self,
+        *,
+        channel_id: int,
+        peer_user_id: str,
+        avatar_fingerprint: str,
+        source_path: str | Path,
+        filename: str | None = None,
+        content_type: str | None = None,
+    ) -> StoredMedia:
+        self.cleanup_expired_profile_avatars()
+        avatar_key = self._profile_avatar_key(
+            channel_id=channel_id,
+            peer_user_id=peer_user_id,
+            avatar_fingerprint=avatar_fingerprint,
+        )
+        existing = self._profile_avatars.get(avatar_key) or self._load_profile_avatar(
+            avatar_key
+        )
+        if existing is not None:
+            self._delete_profile_avatar(avatar_key, existing)
+
+        source = Path(source_path)
+        target_name = filename or source.name or f"{avatar_key}.bin"
+        target = self._profile_avatar_dir / f"{avatar_key}-{target_name}"
+        shutil.copyfile(source, target)
+        resolved_content_type = (
+            content_type
+            or mimetypes.guess_type(target_name)[0]
+            or "application/octet-stream"
+        )
+        stored = StoredMedia(
+            media_id=avatar_key,
+            path=target,
+            filename=target_name,
+            content_type=resolved_content_type,
+            expires_at=int(time.time()) + self._settings.avatar_ttl_seconds,
+        )
+        self._profile_avatars[avatar_key] = stored
+        self._write_profile_avatar_metadata(avatar_key, stored)
+        return stored
+
     def signed_url(self, media_id: str) -> str:
         token = encode_jwt(
             {
@@ -132,6 +249,38 @@ class MediaStore:
             raise FileNotFoundError("Media not found or expired")
         return stored
 
+    def has_profile_avatar(
+        self, *, channel_id: int, peer_user_id: str, avatar_fingerprint: str
+    ) -> bool:
+        avatar_key = self._profile_avatar_key(
+            channel_id=channel_id,
+            peer_user_id=peer_user_id,
+            avatar_fingerprint=avatar_fingerprint,
+        )
+        stored = self._profile_avatars.get(avatar_key) or self._load_profile_avatar(
+            avatar_key
+        )
+        if stored is None or stored.expires_at < int(time.time()):
+            self._delete_profile_avatar(avatar_key, stored)
+            return False
+        return True
+
+    def get_profile_avatar(
+        self, *, channel_id: int, peer_user_id: str, avatar_fingerprint: str
+    ) -> StoredMedia:
+        avatar_key = self._profile_avatar_key(
+            channel_id=channel_id,
+            peer_user_id=peer_user_id,
+            avatar_fingerprint=avatar_fingerprint,
+        )
+        stored = self._profile_avatars.get(avatar_key) or self._load_profile_avatar(
+            avatar_key
+        )
+        if stored is None or stored.expires_at < int(time.time()):
+            self._delete_profile_avatar(avatar_key, stored)
+            raise FileNotFoundError("Profile avatar not found or expired")
+        return stored
+
     def cleanup_expired(self) -> None:
         now = int(time.time())
         expired_ids = [
@@ -148,10 +297,32 @@ class MediaStore:
             stored = self._load_from_disk(media_id)
             if stored is None or stored.expires_at < now or not stored.path.exists():
                 self._delete_media(media_id, stored)
+        self.cleanup_expired_profile_avatars()
+
+    def cleanup_expired_profile_avatars(self) -> None:
+        now = int(time.time())
+        expired_keys = [
+            avatar_key
+            for avatar_key, stored in self._profile_avatars.items()
+            if stored.expires_at < now or not stored.path.exists()
+        ]
+        for avatar_key in expired_keys:
+            self._delete_profile_avatar(avatar_key)
+        for metadata_path in self._profile_avatar_dir.glob("*.json"):
+            avatar_key = metadata_path.stem
+            if avatar_key in self._profile_avatars:
+                continue
+            stored = self._load_profile_avatar(avatar_key)
+            if stored is None or stored.expires_at < now or not stored.path.exists():
+                self._delete_profile_avatar(avatar_key, stored)
 
     def _coerce_metadata_payload(self, payload: object) -> dict | None:
         if isinstance(payload, dict):
             return payload
-        if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict):
+        if (
+            isinstance(payload, list)
+            and len(payload) == 1
+            and isinstance(payload[0], dict)
+        ):
             return payload[0]
         return None
