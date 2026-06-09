@@ -19,7 +19,9 @@ class _FakeCallbacks:
         self.failures_before_success = failures_before_success
         self.deliveries = []
 
-    async def send_event(self, *, callback_url, webhook_secret, channel_id, event, data):
+    async def send_event(
+        self, *, callback_url, webhook_secret, channel_id, event, data
+    ):
         if self.failures_before_success > 0:
             self.failures_before_success -= 1
             raise RuntimeError("callback unavailable")
@@ -63,7 +65,9 @@ class GatewayOutboxTest(unittest.IsolatedAsyncioTestCase):
             contacts_include_dialogs=True,
         )
 
-    async def test_history_event_is_delivered_from_outbox_and_marks_sync_completed(self):
+    async def test_history_event_is_delivered_from_outbox_and_marks_sync_completed(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings = self.build_settings(root)
@@ -107,15 +111,23 @@ class GatewayOutboxTest(unittest.IsolatedAsyncioTestCase):
                     if delivery["event"] == HISTORY_MESSAGE_EVENT
                 ]
                 self.assertEqual(1, len(message_deliveries))
-                self.assertEqual("completed", runtime.state.runtime_state["history_sync_state"])
+                self.assertEqual(
+                    "completed", runtime.state.runtime_state["history_sync_state"]
+                )
                 self.assertEqual(1, runtime.state.runtime_state["history_sync_count"])
-                self.assertEqual(0, runtime.state.runtime_state["history_sync_pending_count"])
-                self.assertEqual(0, runtime.state.runtime_state["history_sync_dead_count"])
+                self.assertEqual(
+                    0, runtime.state.runtime_state["history_sync_pending_count"]
+                )
+                self.assertEqual(
+                    0, runtime.state.runtime_state["history_sync_dead_count"]
+                )
             finally:
                 await runtime.close()
                 store.close()
 
-    async def test_history_event_dead_letters_and_marks_sync_completed_with_errors(self):
+    async def test_history_event_dead_letters_and_marks_sync_completed_with_errors(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings = self.build_settings(root, max_attempts=1)
@@ -158,9 +170,15 @@ class GatewayOutboxTest(unittest.IsolatedAsyncioTestCase):
                     runtime.state.runtime_state["history_sync_state"],
                 )
                 self.assertEqual(0, runtime.state.runtime_state["history_sync_count"])
-                self.assertEqual(0, runtime.state.runtime_state["history_sync_pending_count"])
-                self.assertEqual(1, runtime.state.runtime_state["history_sync_dead_count"])
-                self.assertIn("unavailable", runtime.state.runtime_state["history_sync_error"])
+                self.assertEqual(
+                    0, runtime.state.runtime_state["history_sync_pending_count"]
+                )
+                self.assertEqual(
+                    1, runtime.state.runtime_state["history_sync_dead_count"]
+                )
+                self.assertIn(
+                    "unavailable", runtime.state.runtime_state["history_sync_error"]
+                )
             finally:
                 await runtime.close()
                 store.close()

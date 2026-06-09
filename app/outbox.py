@@ -62,7 +62,9 @@ class GatewayStore:
         except json.JSONDecodeError:
             return {}
 
-    def save_runtime_state(self, channel_id: int, runtime_state: Dict[str, Any]) -> None:
+    def save_runtime_state(
+        self, channel_id: int, runtime_state: Dict[str, Any]
+    ) -> None:
         now = _iso_now()
         payload = json.dumps(runtime_state or {}, separators=(",", ":"), sort_keys=True)
         with self._lock:
@@ -187,7 +189,9 @@ class GatewayStore:
             )
             self._conn.commit()
 
-    def mark_dead(self, event_id: int, *, delivery_attempts: int, error_message: str) -> None:
+    def mark_dead(
+        self, event_id: int, *, delivery_attempts: int, error_message: str
+    ) -> None:
         now = _iso_now()
         with self._lock:
             self._conn.execute(
@@ -240,7 +244,9 @@ class GatewayStore:
             self._conn.commit()
             return cursor.rowcount
 
-    def requeue_dead_events(self, *, channel_id: int, category: str, scope_key: str) -> int:
+    def requeue_dead_events(
+        self, *, channel_id: int, category: str, scope_key: str
+    ) -> int:
         now = _iso_now()
         with self._lock:
             cursor = self._conn.execute(

@@ -148,7 +148,9 @@ class GatewayMessageEditTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([], runtime._client.edit_message_calls)
 
-    async def test_edit_message_falls_back_to_client_edit_when_message_fetch_fails(self):
+    async def test_edit_message_falls_back_to_client_edit_when_message_fetch_fails(
+        self,
+    ):
         edited_message = _FakeEditableMessage(778)
         runtime = await self.build_runtime(
             _FakeClient(fetched_message=None, edited_message=edited_message)

@@ -24,9 +24,7 @@ def encode_jwt(payload: Dict[str, Any], secret: str) -> str:
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     )
     signing_input = f"{header_segment}.{payload_segment}".encode("ascii")
-    signature = hmac.new(
-        secret.encode("utf-8"), signing_input, hashlib.sha256
-    ).digest()
+    signature = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
     return f"{header_segment}.{payload_segment}.{_b64url_encode(signature)}"
 
 

@@ -20,7 +20,13 @@ class CallbackClient:
         await self._client.aclose()
 
     async def send_event(
-        self, *, callback_url: str, webhook_secret: str, channel_id: int, event: str, data: Dict[str, Any]
+        self,
+        *,
+        callback_url: str,
+        webhook_secret: str,
+        channel_id: int,
+        event: str,
+        data: Dict[str, Any],
     ) -> None:
         token = encode_jwt(
             {

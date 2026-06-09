@@ -26,6 +26,9 @@ class _FakeAuthorizedClient:
     async def is_user_authorized(self):
         return True
 
+    async def disconnect(self):
+        return None
+
 
 class GatewayContactsFirstTest(unittest.IsolatedAsyncioTestCase):
     def build_settings(self, root: Path) -> GatewaySettings:
@@ -53,7 +56,9 @@ class GatewayContactsFirstTest(unittest.IsolatedAsyncioTestCase):
             contacts_include_dialogs=True,
         )
 
-    async def test_manual_full_history_with_contacts_waits_for_contacts_completion(self):
+    async def test_manual_full_history_with_contacts_waits_for_contacts_completion(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings = self.build_settings(root)
@@ -80,7 +85,9 @@ class GatewayContactsFirstTest(unittest.IsolatedAsyncioTestCase):
             history_requests = []
             contacts_requests = []
 
-            def fake_schedule_history_sync(*, reason: str, force: bool = False, reset_cursor: bool = False):
+            def fake_schedule_history_sync(
+                *, reason: str, force: bool = False, reset_cursor: bool = False
+            ):
                 history_requests.append(
                     {
                         "reason": reason,
@@ -101,7 +108,9 @@ class GatewayContactsFirstTest(unittest.IsolatedAsyncioTestCase):
             runtime._schedule_contacts_sync = fake_schedule_contacts_sync
 
             try:
-                await runtime.history_sync(force=True, reset_cursor=True, include_contacts=True)
+                await runtime.history_sync(
+                    force=True, reset_cursor=True, include_contacts=True
+                )
 
                 self.assertEqual(
                     [{"reason": "manual", "force": True}],
@@ -114,7 +123,9 @@ class GatewayContactsFirstTest(unittest.IsolatedAsyncioTestCase):
                 )
 
                 runtime.state.runtime_state["contacts_sync_state"] = "completed"
-                queued_history_started = runtime._maybe_schedule_history_after_contacts()
+                queued_history_started = (
+                    runtime._maybe_schedule_history_after_contacts()
+                )
 
                 self.assertTrue(queued_history_started)
                 self.assertEqual(
