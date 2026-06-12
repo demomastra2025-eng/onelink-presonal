@@ -1,7 +1,38 @@
 import os
+import re
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
+
+
+def normalize_ignored_chat_id(value: Any) -> str | None:
+    text = str(value or "").strip().strip("'\"")
+    return text or None
+
+
+def parse_ignored_chat_ids(value: Any) -> set[str]:
+    if value is None:
+        return set()
+
+    if isinstance(value, str):
+        items = re.split(r"[\s,;]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [value]
+
+    return {
+        normalized for item in items if (normalized := normalize_ignored_chat_id(item))
+    }
+
+
+def first_present_env(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip():
+            return value
+    return ""
 
 
 class GatewaySettings(BaseModel):
@@ -36,6 +67,7 @@ class GatewaySettings(BaseModel):
     contacts_dialog_limit: int = 0
     contacts_include_saved: bool = True
     contacts_include_dialogs: bool = True
+    ignored_chat_ids: set[str] = Field(default_factory=set)
 
 
 def load_settings() -> GatewaySettings:
@@ -107,4 +139,10 @@ def load_settings() -> GatewaySettings:
             "TELEGRAM_PERSONAL_GATEWAY_CONTACTS_INCLUDE_DIALOGS", "true"
         ).lower()
         in {"1", "true", "yes", "on"},
+        ignored_chat_ids=parse_ignored_chat_ids(
+            first_present_env(
+                "TELEGRAM_PERSONAL_GATEWAY_IGNORED_CHAT_IDS",
+                "TELEGRAM_PERSONAL_GATEWAY_BLACKLIST_CHAT_IDS",
+            )
+        ),
     )

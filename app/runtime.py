@@ -14,7 +14,11 @@ from telethon import TelegramClient, errors, events, functions, types
 from telethon.sessions import StringSession
 
 from app.callbacks import CallbackClient
-from app.config import GatewaySettings
+from app.config import (
+    GatewaySettings,
+    normalize_ignored_chat_id,
+    parse_ignored_chat_ids,
+)
 from app.media_store import MediaStore
 from app.outbox import GatewayStore, OutboxEvent
 from app.schemas import (
@@ -259,6 +263,8 @@ class ChannelRuntime:
             return self.state.snapshot()
 
     async def fetch_profile_avatar(self, *, peer_user_id: str, avatar_fingerprint: str):
+        self._raise_if_chat_ignored(peer_user_id)
+
         try:
             return self._media_store.get_profile_avatar(
                 channel_id=self.state.channel_id,
@@ -384,6 +390,7 @@ class ChannelRuntime:
                     "contacts_sync_dead_count", 0
                 ),
                 "unread_reactions_count": unread_reactions_count,
+                "ignored_chat_ids_count": len(self._ignored_chat_ids()),
                 "me": me,
             }
 
@@ -440,7 +447,9 @@ class ChannelRuntime:
         async with self._lock:
             await self._ensure_client()
             await self._connect_if_needed()
-            entity = await self._resolve_entity(payload.chat_id or payload.recipient_id)
+            target_id = payload.chat_id or payload.recipient_id
+            self._raise_if_chat_ignored(target_id)
+            entity = await self._resolve_entity(target_id)
             sent_message = None
             message_ids: list[str] = []
             reply_to = (
@@ -506,7 +515,9 @@ class ChannelRuntime:
         async with self._lock:
             await self._ensure_client()
             await self._connect_if_needed()
-            entity = await self._resolve_entity(payload.chat_id or payload.recipient_id)
+            target_id = payload.chat_id or payload.recipient_id
+            self._raise_if_chat_ignored(target_id)
+            entity = await self._resolve_entity(target_id)
             max_id = int(payload.max_id)
             await self._client.send_read_acknowledge(
                 entity, max_id=max_id, clear_reactions=True
@@ -519,7 +530,9 @@ class ChannelRuntime:
         async with self._lock:
             await self._ensure_client()
             await self._connect_if_needed()
-            entity = await self._resolve_entity(payload.chat_id or payload.recipient_id)
+            target_id = payload.chat_id or payload.recipient_id
+            self._raise_if_chat_ignored(target_id)
+            entity = await self._resolve_entity(target_id)
             message_id = int(payload.message_id)
             edited_message = await self._edit_existing_message(
                 entity=entity,
@@ -540,7 +553,9 @@ class ChannelRuntime:
         async with self._lock:
             await self._ensure_client()
             await self._connect_if_needed()
-            entity = await self._resolve_entity(payload.chat_id or payload.recipient_id)
+            target_id = payload.chat_id or payload.recipient_id
+            self._raise_if_chat_ignored(target_id)
+            entity = await self._resolve_entity(target_id)
             message_ids = [
                 int(message_id)
                 for message_id in payload.message_ids
@@ -821,6 +836,11 @@ class ChannelRuntime:
             )
 
     async def _deliver_outbox_event(self, outbox_event: OutboxEvent) -> None:
+        if self._outbox_event_ignored(outbox_event):
+            self._store.mark_acked(outbox_event.id)
+            await self._after_outbox_ack(outbox_event)
+            return
+
         try:
             await self._callbacks.send_event(
                 callback_url=outbox_event.callback_url,
@@ -1336,6 +1356,8 @@ class ChannelRuntime:
                     peer_user_id = int(payload["peer_user_id"])
                     if peer_user_id in seen_user_ids:
                         continue
+                    if self._is_ignored_chat_id(peer_user_id):
+                        continue
                     inserted = await self._emit_contact_import(payload)
                     seen_user_ids.add(peer_user_id)
                     if inserted:
@@ -1367,6 +1389,8 @@ class ChannelRuntime:
                         continue
                     peer_user_id = int(payload["peer_user_id"])
                     if peer_user_id in seen_user_ids:
+                        continue
+                    if self._is_ignored_chat_id(peer_user_id):
                         continue
                     inserted = await self._emit_contact_import(payload)
                     seen_user_ids.add(peer_user_id)
@@ -1647,6 +1671,11 @@ class ChannelRuntime:
             if key not in merged:
                 merged[key] = value
 
+        if "ignored_chat_ids" in incoming:
+            merged["ignored_chat_ids"] = sorted(
+                parse_ignored_chat_ids(incoming.get("ignored_chat_ids"))
+            )
+
         for prefix in ("history_sync", "contacts_sync", "qr_login"):
             if self._prefixed_runtime_state_is_newer(incoming, local, prefix):
                 merged = self._overlay_prefixed_runtime_state(merged, incoming, prefix)
@@ -1707,6 +1736,8 @@ class ChannelRuntime:
         user_id = getattr(user, "id", None)
         if user_id is None:
             return None
+        if self._is_ignored_chat_id(user_id):
+            return None
 
         avatar_url = await self._profile_photo_url(user)
         return {
@@ -1731,6 +1762,8 @@ class ChannelRuntime:
             return False
         if isinstance(entity, types.User) and getattr(entity, "is_self", False):
             return False
+        if self._is_ignored_chat_id(self._dialog_user_id(dialog)):
+            return False
         return True
 
     async def _iter_history_payloads_for_dialog_user_id(
@@ -1741,6 +1774,9 @@ class ChannelRuntime:
         reset_cursor: bool,
         min_message_id: int = 0,
     ):
+        if self._is_ignored_chat_id(dialog_user_id):
+            return
+
         entity = await self._resolve_entity(str(dialog_user_id))
         pending_album: list[Any] = []
         pending_grouped_id: Any = None
@@ -1876,6 +1912,8 @@ class ChannelRuntime:
     async def _on_album(self, event: events.Album.Event) -> None:
         if not getattr(event, "is_private", False):
             return
+        if self._is_ignored_event_chat(event):
+            return
         try:
             payload = await self._serialize_album_event(event)
             await self._callbacks.send_event(
@@ -1904,6 +1942,8 @@ class ChannelRuntime:
             chat_id = self._event_chat_user_id(event)
             if not chat_id or not event.max_id:
                 return
+            if self._is_ignored_chat_id(chat_id):
+                return
             await self._callbacks.send_event(
                 callback_url=self.state.callback_url,
                 webhook_secret=self.state.webhook_secret,
@@ -1924,6 +1964,8 @@ class ChannelRuntime:
     async def _on_message_reactions(self, update: types.UpdateMessageReactions) -> None:
         peer = getattr(update, "peer", None)
         if not isinstance(peer, types.PeerUser):
+            return
+        if self._is_ignored_chat_id(peer.user_id):
             return
         try:
             await self._callbacks.send_event(
@@ -1955,6 +1997,9 @@ class ChannelRuntime:
         ]
         if not message_ids:
             return
+        chat_id = self._event_chat_user_id(event)
+        if not chat_id or self._is_ignored_chat_id(chat_id):
+            return
         try:
             await self._callbacks.send_event(
                 callback_url=self.state.callback_url,
@@ -1973,6 +2018,8 @@ class ChannelRuntime:
         self, *, event: events.common.EventCommon, event_name: str
     ) -> None:
         if not await self._is_private_user_message(event):
+            return
+        if self._is_ignored_event_chat(event):
             return
         try:
             emitted_event = event_name
@@ -2016,6 +2063,46 @@ class ChannelRuntime:
             return int(peer.user_id)
 
         return None
+
+    def _dialog_user_id(self, dialog: Any) -> Optional[int]:
+        entity = getattr(dialog, "entity", None)
+        user_id = getattr(entity, "id", None) or getattr(entity, "user_id", None)
+        if user_id is None:
+            user_id = getattr(getattr(dialog, "peer_id", None), "user_id", None)
+        return int(user_id) if user_id is not None else None
+
+    def _ignored_chat_ids(self) -> set[str]:
+        return self._settings.ignored_chat_ids | parse_ignored_chat_ids(
+            self.state.runtime_state.get("ignored_chat_ids")
+        )
+
+    def _is_ignored_chat_id(self, value: Any) -> bool:
+        chat_id = normalize_ignored_chat_id(value)
+        return bool(chat_id and chat_id in self._ignored_chat_ids())
+
+    def _is_ignored_event_chat(self, event: events.common.EventCommon) -> bool:
+        chat_id = self._event_chat_user_id(event)
+        if chat_id and self._is_ignored_chat_id(chat_id):
+            return True
+
+        message = getattr(event, "message", None)
+        peer_user_id = self._private_dialog_user_id(message) if message else None
+        return self._is_ignored_chat_id(peer_user_id)
+
+    def _raise_if_chat_ignored(self, value: Any) -> None:
+        if self._is_ignored_chat_id(value):
+            raise ValueError("Telegram Personal chat is ignored by system policy")
+
+    def _outbox_event_ignored(self, outbox_event: OutboxEvent) -> bool:
+        if outbox_event.category not in {HISTORY_OUTBOX_CATEGORY, CONTACTS_OUTBOX_CATEGORY}:
+            return False
+        return self._payload_ignored(outbox_event.payload)
+
+    def _payload_ignored(self, payload: Dict[str, Any]) -> bool:
+        for key in ("chat_id", "peer_user_id", "sender_id"):
+            if self._is_ignored_chat_id(payload.get(key)):
+                return True
+        return False
 
     async def _serialize_activity_event(
         self, message: types.Message
@@ -2749,6 +2836,13 @@ class RuntimeManager:
     async def fetch_profile_avatar(
         self, channel_id: int, *, peer_user_id: str, avatar_fingerprint: str
     ):
+        runtime = self._runtimes.get(channel_id)
+        if runtime is None:
+            if normalize_ignored_chat_id(peer_user_id) in self._settings.ignored_chat_ids:
+                raise FileNotFoundError("Profile avatar not found or expired")
+        else:
+            runtime._raise_if_chat_ignored(peer_user_id)
+
         try:
             return self._media_store.get_profile_avatar(
                 channel_id=channel_id,
@@ -2756,7 +2850,6 @@ class RuntimeManager:
                 avatar_fingerprint=avatar_fingerprint,
             )
         except FileNotFoundError:
-            runtime = self._runtimes.get(channel_id)
             if runtime is None:
                 raise KeyError(f"Channel {channel_id} is not synced")
             return await runtime.fetch_profile_avatar(
